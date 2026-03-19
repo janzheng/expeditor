@@ -1,0 +1,12 @@
+# Bus logs (generated at runtime)
+bus-*.jsonl
+
+# Registry (runtime state)
+.sigbus/
+
+# Test results (regeneratable by running tests)
+tests/phase0/results/
+tests/phase1-2/results/
+
+# Deno cache
+.deno/

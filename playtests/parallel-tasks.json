@@ -1,0 +1,5 @@
+[
+  { "prompt": "Say: alpha", "name": "tour-par-a", "worktree": false },
+  { "prompt": "Say: beta", "name": "tour-par-b", "worktree": false },
+  { "prompt": "Say: gamma", "name": "tour-par-c", "worktree": false }
+]

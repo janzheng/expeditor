@@ -1,0 +1,12 @@
+[
+  {
+    "prompt": "Read src/types.ts and count the exports",
+    "name": "tour-tui-reader",
+    "worktree": false
+  },
+  {
+    "prompt": "Say: hello from hands-on TUI step",
+    "name": "tour-tui-simple",
+    "worktree": false
+  }
+]

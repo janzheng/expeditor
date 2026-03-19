@@ -1,0 +1,15 @@
+{
+  "tasks": {
+    "expo": "deno run --allow-all src/cli.ts",
+    "tui": "deno run --allow-all src/tui.tsx",
+    "watch": "deno run --allow-read src/watch.ts",
+    "tmux": "deno run --allow-all src/tmux-consumer.ts",
+    "test": "bash tests/phase1-2/run-all.sh",
+    "test:phase0": "bash tests/phase0/run-all.sh",
+    "test:all": "bash tests/phase0/run-all.sh && bash tests/phase1-2/run-all.sh"
+  },
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "npm:react@19"
+  }
+}

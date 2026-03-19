@@ -1,0 +1,671 @@
+#!/usr/bin/env -S deno run --allow-run --allow-read --allow-write --allow-env
+
+/**
+ * Signal Bus CLI — Spawn agents, watch signals, manage worktrees
+ *
+ * Usage:
+ *   deno run --allow-all src/cli.ts spawn "implement auth" --name auth-agent
+ *   deno run --allow-all src/cli.ts spawn-all tasks.json
+ *   deno run --allow-all src/cli.ts watch bus.jsonl
+ */
+
+import { SignalBus } from "./bus.ts";
+import { AgentSpawner, type SpawnOptions } from "./spawner.ts";
+import { Registry } from "./registry.ts";
+import { reviewLoop, race, ralph, costGuard, escalationRouter } from "./orchestrator.ts";
+import type { AgentSignal } from "./types.ts";
+
+// --- Colors ---
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const DIM = "\x1b[2m";
+const GREEN = "\x1b[32m";
+const YELLOW = "\x1b[33m";
+const BLUE = "\x1b[34m";
+const RED = "\x1b[31m";
+const CYAN = "\x1b[36m";
+
+// --- Pretty signal printer (headless UI consumer) ---
+function printSignal(signal: AgentSignal): void {
+  const agent = `${BOLD}${signal.agentId}${RESET}`;
+  const ts = new Date(signal.timestamp).toISOString().slice(11, 19);
+  const prefix = `${DIM}${ts}${RESET} ${agent}`;
+
+  switch (signal.type) {
+    case "spawned": {
+      const model = (signal.payload as Record<string, unknown>).model ?? "";
+      console.log(`${prefix} ${GREEN}● spawned${RESET} ${DIM}(${model})${RESET}`);
+      break;
+    }
+    case "tool_call": {
+      const p = signal.payload as Record<string, unknown>;
+      const tool = p.tool as string;
+      const isSubagent = p.isSubagent;
+      const icon = isSubagent ? `${CYAN}◆ Agent` : `${BLUE}├ ${tool}`;
+      const detail = isSubagent
+        ? ` ${DIM}${p.subagentDescription}${RESET}`
+        : formatToolInput(tool, p.input as Record<string, unknown>);
+      console.log(`${prefix} ${icon}${RESET}${detail}`);
+      break;
+    }
+    case "tool_result": {
+      const p = signal.payload as Record<string, unknown>;
+      const err = p.isError ? `${RED}✗${RESET}` : `${GREEN}✓${RESET}`;
+      console.log(`${prefix} ${DIM}│${RESET} ${err}`);
+      break;
+    }
+    case "output": {
+      const text = ((signal.payload as Record<string, unknown>).text as string) ?? "";
+      if (text.length > 120) {
+        console.log(`${prefix} ${text.slice(0, 120)}${DIM}...${RESET}`);
+      } else {
+        console.log(`${prefix} ${text}`);
+      }
+      break;
+    }
+    case "progress": {
+      const p = signal.payload as Record<string, unknown>;
+      const msg = (p.message as string) ?? "";
+      const preview = msg.length > 80 ? msg.slice(0, 80) + "..." : msg;
+      console.log(`${prefix} ${DIM}💭 ${preview}${RESET}`);
+      break;
+    }
+    case "done": {
+      const p = signal.payload as Record<string, unknown>;
+      const dur = ((p.durationMs as number) / 1000).toFixed(1);
+      console.log(`${prefix} ${GREEN}✅ done${RESET} ${DIM}(${dur}s, ${p.numTurns} turns)${RESET}`);
+      break;
+    }
+    case "failed": {
+      const p = signal.payload as Record<string, unknown>;
+      console.log(`${prefix} ${RED}✗ failed${RESET}: ${p.error}`);
+      break;
+    }
+    case "cost": {
+      const p = signal.payload as Record<string, unknown>;
+      const cost = (p.totalCostUsd as number)?.toFixed(4) ?? "?";
+      const input = (p.inputTokens as number) ?? 0;
+      const output = (p.outputTokens as number) ?? 0;
+      console.log(
+        `${prefix} ${DIM}💰 $${cost} · ${input + output} tokens${RESET}`,
+      );
+      break;
+    }
+  }
+}
+
+function formatToolInput(tool: string, input: Record<string, unknown>): string {
+  switch (tool) {
+    case "Read":
+      return ` ${DIM}${input.file_path}${RESET}`;
+    case "Edit":
+      return ` ${DIM}${input.file_path}${RESET}`;
+    case "Write":
+      return ` ${DIM}${input.file_path}${RESET}`;
+    case "Bash":
+      return ` ${DIM}${String(input.command ?? "").slice(0, 60)}${RESET}`;
+    case "Glob":
+      return ` ${DIM}${input.pattern}${RESET}`;
+    case "Grep":
+      return ` ${DIM}${input.pattern}${RESET}`;
+    default:
+      return "";
+  }
+}
+
+// --- Commands ---
+
+async function cmdSpawn(args: string[]): Promise<void> {
+  const prompt = args[0];
+  if (!prompt) {
+    console.error("Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree]");
+    Deno.exit(1);
+  }
+
+  // Parse flags
+  let name = "agent-" + crypto.randomUUID().slice(0, 8);
+  let model: string | undefined;
+  let worktree = true;
+  let agent: "claude" | "codex" = "claude";
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--name" && args[i + 1]) {
+      name = args[++i];
+    } else if (args[i] === "--model" && args[i + 1]) {
+      model = args[++i];
+    } else if (args[i] === "--agent" && args[i + 1]) {
+      agent = args[++i] as "claude" | "codex";
+    } else if (args[i] === "--no-worktree") {
+      worktree = false;
+    }
+  }
+
+  const logFile = `bus-${Date.now()}.jsonl`;
+  const bus = new SignalBus({ logFile });
+  await bus.init();
+  bus.subscribe(printSignal);
+
+  const registry = new Registry();
+  const spawner = new AgentSpawner(bus, { registry });
+  await spawner.init();
+
+  console.log(`${BOLD}Signal Bus${RESET}`);
+  console.log(`  Agent:   ${name} (${agent})`);
+  console.log(`  Log:     ${logFile}`);
+  console.log(`  Worktree: ${worktree ? "yes" : "no"}`);
+  console.log("");
+
+  const spawnedAgent = await spawner.spawn({
+    prompt,
+    name,
+    agent,
+    label: name,
+    model,
+    worktree,
+  });
+
+  const result = await spawnedAgent.done;
+  console.log("");
+  console.log(`${BOLD}Exit${RESET}: ${result.exitCode === 0 ? GREEN + "success" : RED + "failed"} (code ${result.exitCode})${RESET}`);
+  console.log(`${DIM}Session: ${spawnedAgent.sessionId}${RESET}`);
+  if (agent === "claude") {
+    console.log(`${DIM}Resume:  claude --resume ${spawnedAgent.sessionId}${RESET}`);
+  } else {
+    console.log(`${DIM}Resume:  codex resume --last${RESET}`);
+  }
+
+  await bus.close();
+}
+
+async function cmdSpawnAll(args: string[]): Promise<void> {
+  const tasksFile = args[0];
+  if (!tasksFile) {
+    console.error("Usage: cli.ts spawn-all <tasks.json>");
+    console.error("");
+    console.error("tasks.json format:");
+    console.error('  [{"prompt": "...", "name": "agent-1"}, ...]');
+    Deno.exit(1);
+  }
+
+  const tasks: SpawnOptions[] = JSON.parse(await Deno.readTextFile(tasksFile));
+
+  const logFile = `bus-${Date.now()}.jsonl`;
+  const bus = new SignalBus({ logFile });
+  await bus.init();
+  bus.subscribe(printSignal);
+
+  const registry = new Registry();
+  const spawner = new AgentSpawner(bus, { registry });
+  await spawner.init();
+
+  console.log(`${BOLD}Signal Bus — ${tasks.length} agents${RESET}`);
+  console.log(`  Log: ${logFile}`);
+  console.log("");
+
+  const agents = await spawner.spawnAll(tasks);
+
+  // Wait for all to finish
+  const results = await Promise.allSettled(agents.map((a) => a.done));
+
+  console.log("");
+  console.log(`${BOLD}=== Results ===${RESET}`);
+  for (let i = 0; i < agents.length; i++) {
+    const agent = agents[i];
+    const result = results[i];
+    const status = result.status === "fulfilled"
+      ? result.value.exitCode === 0
+        ? `${GREEN}success${RESET}`
+        : `${RED}failed (${result.value.exitCode})${RESET}`
+      : `${RED}error: ${(result as PromiseRejectedResult).reason}${RESET}`;
+
+    console.log(`  ${agent.agentId}: ${status}`);
+    console.log(`    ${DIM}Resume: claude --resume ${agent.sessionId}${RESET}`);
+  }
+
+  await bus.close();
+}
+
+async function cmdStatus(): Promise<void> {
+  const registry = new Registry();
+  await registry.load();
+
+  const entries = registry.getAll();
+  if (entries.length === 0) {
+    console.log(`${DIM}No agents in registry.${RESET}`);
+    return;
+  }
+
+  console.log(`${BOLD}Agent Registry${RESET}`);
+  console.log("");
+
+  for (const entry of entries) {
+    const statusColor =
+      entry.status === "running" ? YELLOW :
+      entry.status === "done" ? GREEN : RED;
+    const dur = entry.finishedAt
+      ? `${((entry.finishedAt - entry.startedAt) / 1000).toFixed(1)}s`
+      : `${((Date.now() - entry.startedAt) / 1000).toFixed(0)}s...`;
+
+    console.log(`  ${statusColor}●${RESET} ${BOLD}${entry.agentId}${RESET} ${DIM}(${entry.status}, ${dur})${RESET}`);
+    console.log(`    ${DIM}Session: ${entry.sessionId}${RESET}`);
+    if (entry.worktreePath) {
+      console.log(`    ${DIM}Worktree: ${entry.worktreePath}${RESET}`);
+    }
+    if (entry.prompt) {
+      console.log(`    ${DIM}Prompt: ${entry.prompt.slice(0, 80)}${entry.prompt.length > 80 ? "..." : ""}${RESET}`);
+    }
+    console.log(`    ${DIM}Resume: claude --resume ${entry.sessionId}${RESET}`);
+    console.log("");
+  }
+}
+
+async function cmdResume(args: string[]): Promise<void> {
+  const agentId = args[0];
+  const headless = args.includes("--headless");
+
+  if (!agentId) {
+    console.error("Usage: cli.ts resume <agentId> [--headless]");
+    Deno.exit(1);
+  }
+
+  const registry = new Registry();
+  await registry.load();
+
+  const entry = registry.get(agentId);
+  if (!entry) {
+    console.error(`Agent not found: ${agentId}`);
+    console.error(`Run 'status' to see available agents.`);
+    Deno.exit(1);
+  }
+
+  console.log(`${BOLD}Resuming${RESET}: ${entry.agentId}`);
+  console.log(`  ${DIM}Session: ${entry.sessionId}${RESET}`);
+
+  if (headless) {
+    // Resume headless — pipe back through bus
+    const prompt = args.find((a, i) => i > 0 && a !== "--headless" && !a.startsWith("--"));
+
+    const resumeArgs = [
+      "-p", "--output-format", "stream-json", "--verbose",
+      "--resume", entry.sessionId,
+    ];
+    if (prompt) resumeArgs.push(prompt);
+
+    const logFile = `bus-resume-${Date.now()}.jsonl`;
+    const bus = new SignalBus({ logFile });
+    await bus.init();
+    bus.subscribe(printSignal);
+
+    console.log(`  ${DIM}Mode: headless (signals → ${logFile})${RESET}`);
+    console.log("");
+
+    const command = new Deno.Command("claude", {
+      args: resumeArgs,
+      cwd: entry.cwd,
+      stdout: "piped",
+      stderr: "piped",
+    });
+
+    const process = command.spawn();
+    const { lineStream: ls } = await import("./bus.ts");
+    const lines = ls(process.stdout);
+    const adapterOpts = { agentId: entry.agentId };
+    const { parseStreamJsonLine } = await import("./claude-adapter.ts");
+
+    await bus.pipeLines(lines, (line) => parseStreamJsonLine(line, adapterOpts));
+    const status = await process.status;
+    await bus.close();
+
+    console.log("");
+    console.log(`${BOLD}Exit${RESET}: ${status.code === 0 ? GREEN + "success" : RED + "failed"}${RESET}`);
+  } else {
+    // Resume interactive — hand control to claude directly
+    console.log(`  ${DIM}Mode: interactive${RESET}`);
+    console.log("");
+
+    const resumeArgs = ["--resume", entry.sessionId];
+    const command = new Deno.Command("claude", {
+      args: resumeArgs,
+      cwd: entry.cwd,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+
+    const process = command.spawn();
+    const status = await process.status;
+    Deno.exit(status.code);
+  }
+}
+
+async function cmdFork(args: string[]): Promise<void> {
+  const agentId = args[0];
+  if (!agentId) {
+    console.error("Usage: cli.ts fork <agentId>");
+    Deno.exit(1);
+  }
+
+  const registry = new Registry();
+  await registry.load();
+
+  const entry = registry.get(agentId);
+  if (!entry) {
+    console.error(`Agent not found: ${agentId}`);
+    Deno.exit(1);
+  }
+
+  console.log(`${BOLD}Forking${RESET}: ${entry.agentId} → interactive session`);
+  console.log(`  ${DIM}Parent session: ${entry.sessionId}${RESET}`);
+  console.log("");
+
+  const command = new Deno.Command("claude", {
+    args: ["--resume", entry.sessionId, "--fork-session"],
+    cwd: entry.cwd,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+
+  const process = command.spawn();
+  const status = await process.status;
+  Deno.exit(status.code);
+}
+
+async function cmdCleanup(args: string[]): Promise<void> {
+  const registry = new Registry();
+  await registry.load();
+
+  const bus = new SignalBus();
+  const spawner = new AgentSpawner(bus, { registry });
+  await spawner.init();
+
+  if (args[0] === "--all") {
+    const cleaned = await spawner.cleanupAll();
+    if (cleaned.length === 0) {
+      console.log(`${DIM}No finished agents to clean up.${RESET}`);
+    } else {
+      console.log(`${GREEN}Cleaned up ${cleaned.length} agents:${RESET}`);
+      for (const id of cleaned) {
+        console.log(`  ${DIM}${id}${RESET}`);
+      }
+    }
+  } else if (args[0]) {
+    await spawner.cleanup(args[0]);
+    console.log(`${GREEN}Cleaned up: ${args[0]}${RESET}`);
+  } else {
+    console.error("Usage: cli.ts cleanup <agentId> | --all");
+  }
+}
+
+async function cmdReview(args: string[]): Promise<void> {
+  const prompt = args[0];
+  if (!prompt) {
+    console.error("Usage: cli.ts review <prompt> [--max <N>] [--work-agent claude|codex] [--review-agent claude|codex]");
+    Deno.exit(1);
+  }
+
+  let maxIterations = 3;
+  let name = "review";
+  let model: string | undefined;
+  let workAgent: "claude" | "codex" | undefined;
+  let workModel: string | undefined;
+  let reviewAgent: "claude" | "codex" | undefined;
+  let reviewModel: string | undefined;
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--max" && args[i + 1]) maxIterations = parseInt(args[++i]);
+    else if (args[i] === "--name" && args[i + 1]) name = args[++i];
+    else if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--work-agent" && args[i + 1]) workAgent = args[++i] as "claude" | "codex";
+    else if (args[i] === "--work-model" && args[i + 1]) workModel = args[++i];
+    else if (args[i] === "--review-agent" && args[i + 1]) reviewAgent = args[++i] as "claude" | "codex";
+    else if (args[i] === "--review-model" && args[i + 1]) reviewModel = args[++i];
+  }
+
+  const logFile = `bus-review-${Date.now()}.jsonl`;
+  const bus = new SignalBus({ logFile });
+  await bus.init();
+  bus.subscribe(printSignal);
+
+  const registry = new Registry();
+  const spawner = new AgentSpawner(bus, { registry });
+  await spawner.init();
+
+  const unguard = costGuard(bus, { perAgentBudget: 1.0, totalBudget: 5.0 });
+
+  const wAgent = workAgent ?? "claude";
+  const rAgent = reviewAgent ?? "claude";
+
+  console.log(`${BOLD}Review Loop${RESET}${wAgent !== rAgent ? ` ${CYAN}(cross-model: ${wAgent} → ${rAgent})${RESET}` : ""}`);
+  console.log(`  Prompt: ${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}`);
+  console.log(`  Work:   ${wAgent}${workModel ? `:${workModel}` : ""}`);
+  console.log(`  Review: ${rAgent}${reviewModel ? `:${reviewModel}` : ""}`);
+  console.log(`  Max iterations: ${maxIterations}`);
+  console.log(`  Log: ${logFile}`);
+  console.log("");
+
+  const result = await reviewLoop(bus, spawner, {
+    workPrompt: prompt,
+    maxIterations,
+    name,
+    model,
+    workAgent: workAgent,
+    workModel: workModel,
+    reviewAgent: reviewAgent,
+    reviewModel: reviewModel,
+  });
+
+  unguard();
+  await bus.close();
+
+  console.log("");
+  console.log(`${BOLD}=== Review Result ===${RESET}`);
+  console.log(`  Verdict: ${result.verdict === "DONE" ? GREEN : YELLOW}${result.verdict}${RESET}`);
+  console.log(`  Iterations: ${result.iterations}`);
+  console.log(`  Cost: $${result.totalCostUsd.toFixed(4)}`);
+  console.log(`  ${DIM}Output: ${result.lastOutput.slice(0, 200)}${result.lastOutput.length > 200 ? "..." : ""}${RESET}`);
+}
+
+async function cmdRace(args: string[]): Promise<void> {
+  // Parse: race "prompt1" vs "prompt2" [--criteria "..."] [--name prefix]
+  const prompts: string[] = [];
+  let criteria: string | undefined;
+  let name = "race";
+  let model: string | undefined;
+
+  let i = 0;
+  while (i < args.length) {
+    if (args[i] === "vs") { i++; continue; }
+    if (args[i] === "--criteria" && args[i + 1]) { criteria = args[++i]; i++; continue; }
+    if (args[i] === "--name" && args[i + 1]) { name = args[++i]; i++; continue; }
+    if (args[i] === "--model" && args[i + 1]) { model = args[++i]; i++; continue; }
+    prompts.push(args[i]);
+    i++;
+  }
+
+  if (prompts.length < 2) {
+    console.error('Usage: cli.ts race "approach A" vs "approach B" [--criteria "..."]');
+    Deno.exit(1);
+  }
+
+  const logFile = `bus-race-${Date.now()}.jsonl`;
+  const bus = new SignalBus({ logFile });
+  await bus.init();
+  bus.subscribe(printSignal);
+
+  const registry = new Registry();
+  const spawner = new AgentSpawner(bus, { registry });
+  await spawner.init();
+
+  console.log(`${BOLD}Race — ${prompts.length} branches${RESET}`);
+  for (let j = 0; j < prompts.length; j++) {
+    console.log(`  ${j + 1}. ${prompts[j].slice(0, 60)}`);
+  }
+  if (criteria) console.log(`  Criteria: ${criteria}`);
+  console.log(`  Log: ${logFile}`);
+  console.log("");
+
+  const result = await race(bus, spawner, { prompts, criteria, name, model });
+  await bus.close();
+
+  console.log("");
+  console.log(`${BOLD}=== Race Result ===${RESET}`);
+  if (result.winner >= 0) {
+    console.log(`  Winner: ${GREEN}Branch ${result.winner + 1}${RESET}`);
+  } else {
+    console.log(`  ${RED}No winner${RESET}`);
+  }
+  console.log(`  Cost: $${result.totalCostUsd.toFixed(4)}`);
+  console.log(`  ${DIM}Reasoning: ${result.judgeReasoning.slice(0, 200)}${RESET}`);
+}
+
+async function cmdRalph(args: string[]): Promise<void> {
+  const workPrompt = args[0];
+  const gatePrompt = args[1];
+
+  if (!workPrompt || !gatePrompt) {
+    console.error('Usage: cli.ts ralph "<work prompt>" "<gate prompt>" [--max <N>] [--review]');
+    Deno.exit(1);
+  }
+
+  let maxTasks = 5;
+  let review = false;
+  let name = "ralph";
+  let model: string | undefined;
+  for (let i = 2; i < args.length; i++) {
+    if (args[i] === "--max" && args[i + 1]) maxTasks = parseInt(args[++i]);
+    else if (args[i] === "--review") review = true;
+    else if (args[i] === "--name" && args[i + 1]) name = args[++i];
+    else if (args[i] === "--model" && args[i + 1]) model = args[++i];
+  }
+
+  const logFile = `bus-ralph-${Date.now()}.jsonl`;
+  const bus = new SignalBus({ logFile });
+  await bus.init();
+  bus.subscribe(printSignal);
+
+  const registry = new Registry();
+  const spawner = new AgentSpawner(bus, { registry });
+  await spawner.init();
+
+  const unguard = costGuard(bus, { totalBudget: 10.0 });
+  const unescalate = escalationRouter(bus, {
+    failThreshold: 2,
+    onEscalate: (_signal, ctx) => {
+      console.log(`\n${RED}⚠ ESCALATED${RESET}: ${ctx.agentId} failed ${ctx.failCount} times: ${ctx.reason}`);
+    },
+  });
+
+  console.log(`${BOLD}Ralph — Task Progression${RESET}`);
+  console.log(`  Work:  ${workPrompt.slice(0, 60)}${workPrompt.length > 60 ? "..." : ""}`);
+  console.log(`  Gate:  ${gatePrompt.slice(0, 60)}${gatePrompt.length > 60 ? "..." : ""}`);
+  console.log(`  Max:   ${maxTasks} tasks`);
+  console.log(`  Review: ${review ? "yes" : "no"}`);
+  console.log(`  Log:   ${logFile}`);
+  console.log("");
+
+  const result = await ralph(bus, spawner, {
+    workPrompt,
+    gatePrompt,
+    maxTasks,
+    review,
+    name,
+    model,
+  });
+
+  unguard();
+  unescalate();
+  await bus.close();
+
+  console.log("");
+  console.log(`${BOLD}=== Ralph Result ===${RESET}`);
+  console.log(`  Verdict: ${result.verdict === "DONE" ? GREEN : YELLOW}${result.verdict}${RESET}`);
+  console.log(`  Tasks completed: ${result.tasksCompleted}`);
+  console.log(`  Cost: $${result.totalCostUsd.toFixed(4)}`);
+}
+
+// --- Main ---
+
+const [command, ...args] = Deno.args;
+
+switch (command) {
+  case "spawn":
+    await cmdSpawn(args);
+    break;
+
+  case "spawn-all":
+    await cmdSpawnAll(args);
+    break;
+
+  case "status":
+    await cmdStatus();
+    break;
+
+  case "resume":
+    await cmdResume(args);
+    break;
+
+  case "fork":
+    await cmdFork(args);
+    break;
+
+  case "cleanup":
+    await cmdCleanup(args);
+    break;
+
+  case "review":
+    await cmdReview(args);
+    break;
+
+  case "race":
+    await cmdRace(args);
+    break;
+
+  case "ralph":
+    await cmdRalph(args);
+    break;
+
+  case "watch": {
+    // Delegate to watch.ts
+    const watchCmd = new Deno.Command("deno", {
+      args: ["run", "--allow-read", new URL("./watch.ts", import.meta.url).pathname, ...args],
+      stdin: "inherit", stdout: "inherit", stderr: "inherit",
+    });
+    const watchProc = watchCmd.spawn();
+    const watchStatus = await watchProc.status;
+    Deno.exit(watchStatus.code);
+    break;
+  }
+
+  case "help":
+  case "--help":
+  case "-h":
+  default:
+    console.log(`${BOLD}sigbus${RESET} — Subagent signal bus
+
+${BOLD}Commands:${RESET}
+  spawn <prompt> [flags]    Spawn a single agent
+  spawn-all <tasks.json>    Spawn multiple agents in parallel
+  status                    Show all agents in registry
+  resume <agentId>          Resume an agent interactively
+  resume <agentId> --headless  Resume headless (signals → bus)
+  fork <agentId>            Fork from an agent's session (new session)
+  cleanup <agentId>         Remove agent's worktree + registry entry
+  cleanup --all             Clean up all finished agents
+  review <prompt>           Review loop: work → review → gate (DONE/ITERATE)
+  race "A" vs "B" [flags]  Race branches in parallel, pick winner
+
+${BOLD}Spawn flags:${RESET}
+  --name <name>             Agent name (also worktree name)
+  --model <model>           Model override
+  --no-worktree             Run in current directory (no isolation)
+
+${BOLD}Examples:${RESET}
+  sigbus spawn "implement auth" --name auth-agent
+  sigbus spawn-all tasks.json
+  sigbus status
+  sigbus resume auth-agent
+  sigbus fork auth-agent
+  sigbus cleanup --all
+`);
+    break;
+}
