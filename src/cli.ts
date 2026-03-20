@@ -10,13 +10,14 @@
  */
 
 import { SignalBus } from "./bus.ts";
-import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
+import { AgentSpawner, type SpawnOptions, type AgentType, SANDBOX_PRESETS } from "./spawner.ts";
 import { Registry } from "./registry.ts";
 import { reviewLoop, race, ralph, costGuard, escalationRouter } from "./orchestrator.ts";
 import { parseWorkflow, buildAgentPrompt, runWorkflow } from "./workflow.ts";
 import { runMxit } from "./mxit-runner.ts";
 import { withTimeout } from "./timeout.ts";
-import type { AgentSignal } from "./types.ts";
+import { PermissionLedger } from "./permission-ledger.ts";
+import type { AgentSignal, DenialDetail } from "./types.ts";
 
 // --- Paths ---
 const EXPO_DIR = ".expo";
@@ -123,6 +124,44 @@ function formatToolInput(tool: string, input: Record<string, unknown>): string {
   }
 }
 
+// --- Permission ledger helpers ---
+
+async function loadLedger(): Promise<PermissionLedger> {
+  const ledger = new PermissionLedger();
+  await ledger.load();
+  return ledger;
+}
+
+function printDenialReport(ledger: PermissionLedger): void {
+  const pending = ledger.getPending();
+  if (pending.length === 0) return;
+
+  console.log("");
+  console.log(`${YELLOW}⚠ Permission Denials (${pending.length} pending):${RESET}`);
+  for (const entry of pending) {
+    const countStr = entry.count > 1 ? `${entry.count}x` : "1x";
+    console.log(`  ${RED}✗${RESET} ${entry.pattern.padEnd(30)} denied ${countStr}   → ${YELLOW}pending${RESET}`);
+    // Show examples if available
+    if (entry.examples?.length) {
+      for (const ex of entry.examples.slice(-2)) {
+        const parts: string[] = [];
+        if (ex.command) parts.push(ex.command);
+        if (ex.description) parts.push(`(${ex.description})`);
+        if (parts.length > 0) {
+          console.log(`    ${DIM}↳ ${parts.join(" ")}${RESET}`);
+        }
+      }
+    }
+  }
+  console.log("");
+  console.log(`  Run ${DIM}expo permissions${RESET} to review and approve for future runs.`);
+}
+
+async function saveLedgerAndReport(ledger: PermissionLedger): Promise<void> {
+  await ledger.save();
+  printDenialReport(ledger);
+}
+
 // --- Commands ---
 
 async function cmdSpawn(args: string[]): Promise<void> {
@@ -152,6 +191,8 @@ async function cmdSpawn(args: string[]): Promise<void> {
     }
   }
 
+  const ledger = await loadLedger();
+
   const logFile = `${LOGS_DIR}/bus-${Date.now()}.jsonl`;
   const bus = new SignalBus({ logFile });
   await bus.init();
@@ -161,11 +202,29 @@ async function cmdSpawn(args: string[]): Promise<void> {
   const spawner = new AgentSpawner(bus, { registry });
   await spawner.init();
 
+  // Merge ledger approvals into sandbox
+  const baseSandbox = SANDBOX_PRESETS["developer"];
+  const mergedSandbox = ledger.buildSandbox(baseSandbox);
+
   console.log(`${BOLD}Signal Bus${RESET}`);
   console.log(`  Agent:   ${name} (${agent})`);
   console.log(`  Log:     ${logFile}`);
   console.log(`  Worktree: ${worktree ? "yes" : "no"}`);
   console.log("");
+
+  // Track permission denials from bus signals
+  const permissionDenials: string[] = [];
+  const denialDetails: DenialDetail[] = [];
+  bus.subscribe((signal) => {
+    if (signal.agentId !== name) return;
+    if (signal.type === "done" || signal.type === "failed") {
+      const p = signal.payload as Record<string, unknown>;
+      const denials = p.permissionDenials as string[] | undefined;
+      if (denials) permissionDenials.push(...denials);
+      const details = p.denialDetails as DenialDetail[] | undefined;
+      if (details) denialDetails.push(...details);
+    }
+  });
 
   const spawnedAgent = await spawner.spawn({
     prompt,
@@ -174,6 +233,7 @@ async function cmdSpawn(args: string[]): Promise<void> {
     label: name,
     model,
     worktree,
+    sandbox: mergedSandbox,
   });
 
   const timeoutMs = timeout > 0 ? timeout * 1000 : undefined;
@@ -190,6 +250,12 @@ async function cmdSpawn(args: string[]): Promise<void> {
   } else {
     console.log(`${DIM}Resume:  codex resume --last${RESET}`);
   }
+
+  // Record denials and report
+  if (permissionDenials.length > 0) {
+    ledger.recordDenials(permissionDenials, name, denialDetails);
+  }
+  await saveLedgerAndReport(ledger);
 
   await bus.close();
 }
@@ -678,13 +744,23 @@ async function cmdWorkflow(args: string[]): Promise<void> {
     return;
   }
 
+  const ledger = await loadLedger();
+
   const result = await runWorkflow({
     workflowPath: workflowFile,
     model,
     budget,
     sandboxOverride,
     timeout,
+    ledger,
   });
+
+  // Aggregate all denials from agent results into ledger
+  for (const agent of result.agents) {
+    if (agent.permissionDenials.length > 0) {
+      ledger.recordDenials(agent.permissionDenials, agent.name);
+    }
+  }
 
   console.log("");
   console.log(`${BOLD}=== Workflow Results ===${RESET}`);
@@ -708,6 +784,8 @@ async function cmdWorkflow(args: string[]): Promise<void> {
 
   console.log("");
   console.log(`  Total cost: $${result.totalCostUsd.toFixed(4)}`);
+
+  await saveLedgerAndReport(ledger);
 }
 
 async function cmdMxit(args: string[]): Promise<void> {
@@ -735,6 +813,8 @@ async function cmdMxit(args: string[]): Promise<void> {
     else if (args[i] === "--sandbox" && args[i + 1]) sandbox = args[++i];
   }
 
+  const ledger = await loadLedger();
+
   console.log(`${BOLD}mxit Runner${RESET}`);
   console.log(`  Tasks: ${tasksFile}`);
   console.log(`  Agent: ${agent}${model ? `:${model}` : ""}`);
@@ -754,6 +834,7 @@ async function cmdMxit(args: string[]): Promise<void> {
     budget,
     sandbox,
     onSignal: printSignal,
+    ledger,
   });
 
   console.log("");
@@ -769,6 +850,72 @@ async function cmdMxit(args: string[]): Promise<void> {
         ? `${YELLOW}timed out${RESET}`
         : `${RED}failed (${r.exitCode})${RESET}`;
     console.log(`  ${DIM}L${r.task.line}${RESET} ${r.task.description.slice(0, 50)}: ${status}`);
+  }
+
+  await saveLedgerAndReport(ledger);
+}
+
+async function cmdPermissions(args: string[]): Promise<void> {
+  const ledger = await loadLedger();
+  const subcommand = args[0];
+
+  if (subcommand === "approve" && args[1]) {
+    ledger.approve(args[1]);
+    await ledger.save();
+    console.log(`${GREEN}Approved${RESET}: ${args[1]}`);
+    return;
+  }
+
+  if (subcommand === "reject" && args[1]) {
+    ledger.reject(args[1]);
+    await ledger.save();
+    console.log(`${RED}Rejected${RESET}: ${args[1]}`);
+    return;
+  }
+
+  if (subcommand === "reset") {
+    ledger.reset();
+    await ledger.save();
+    console.log(`${GREEN}Ledger cleared.${RESET}`);
+    return;
+  }
+
+  // Default: list all entries
+  const entries = ledger.getAll();
+  if (entries.length === 0) {
+    console.log(`${DIM}No permission entries. Denials are recorded after agent runs.${RESET}`);
+    return;
+  }
+
+  console.log(`${BOLD}Permission Ledger${RESET}`);
+  console.log("");
+
+  for (const entry of entries) {
+    const statusColor =
+      entry.status === "approved" ? GREEN :
+      entry.status === "rejected" ? RED : YELLOW;
+    const countStr = entry.count > 0 ? `${entry.count}x` : "";
+    const sourceStr = entry.source ? ` ${DIM}(from: ${entry.source})${RESET}` : "";
+    console.log(`  ${statusColor}●${RESET} ${entry.pattern.padEnd(30)} ${statusColor}${entry.status}${RESET}  ${DIM}${countStr}${RESET}${sourceStr}`);
+    // Show examples
+    if (entry.examples?.length) {
+      for (const ex of entry.examples) {
+        const parts: string[] = [];
+        if (ex.command) parts.push(ex.command);
+        if (ex.description) parts.push(`(${ex.description})`);
+        if (parts.length > 0) {
+          console.log(`    ${DIM}↳ ${parts.join(" ")}${RESET}`);
+        }
+      }
+    }
+  }
+
+  const pending = entries.filter((e) => e.status === "pending");
+  if (pending.length > 0) {
+    console.log("");
+    console.log(`${DIM}Approve:  expo permissions approve "<pattern>"${RESET}`);
+    console.log(`${DIM}Reject:   expo permissions reject "<pattern>"${RESET}`);
+    console.log(`${DIM}Reset:    expo permissions reset${RESET}`);
   }
 }
 
@@ -821,6 +968,10 @@ switch (command) {
     await cmdMxit(args);
     break;
 
+  case "permissions":
+    await cmdPermissions(args);
+    break;
+
   case "watch": {
     // Delegate to watch.ts
     const watchCmd = new Deno.Command("deno", {
@@ -852,6 +1003,10 @@ ${BOLD}Commands:${RESET}
   race "A" vs "B" [flags]  Race branches in parallel, pick winner
   workflow <file.md>        Run a markdown workflow (agents + synthesis)
   mxit <TASKS.md>           Run ready tasks from a mxit task file
+  permissions               List permission ledger entries
+  permissions approve <p>   Approve a permission pattern for future runs
+  permissions reject <p>    Reject a permission pattern
+  permissions reset         Clear all permission entries
 
 ${BOLD}Spawn flags:${RESET}
   --name <name>             Agent name (also worktree name)

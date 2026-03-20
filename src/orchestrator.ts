@@ -12,6 +12,8 @@ import type { AgentSignal } from "./types.ts";
 import { SignalBus } from "./bus.ts";
 import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
 import { withTimeout } from "./timeout.ts";
+import type { PermissionLedger } from "./permission-ledger.ts";
+import type { DenialDetail } from "./types.ts";
 
 // --- Review Loop ---
 
@@ -411,16 +413,18 @@ export interface SpawnResult {
   exitCode: number;
   timedOut: boolean;
   permissionDenials: string[];
+  denialDetails: DenialDetail[];
 }
 
 export async function spawnAndWait(
   bus: SignalBus,
   spawner: AgentSpawner,
-  opts: SpawnOptions & { worktree?: boolean },
+  opts: SpawnOptions & { worktree?: boolean; ledger?: PermissionLedger },
 ): Promise<SpawnResult> {
   let output = "";
   let cost = 0;
   const permissionDenials: string[] = [];
+  const denialDetails: DenialDetail[] = [];
   const agentId = opts.name;
 
   // Subscribe to capture this agent's output
@@ -435,10 +439,15 @@ export async function spawnAndWait(
       if (typeof result === "string") output = result;
       const denials = p.permissionDenials as string[] | undefined;
       if (denials) permissionDenials.push(...denials);
+      const details = p.denialDetails as DenialDetail[] | undefined;
+      if (details) denialDetails.push(...details);
     }
     if (signal.type === "failed") {
-      const denials = (signal.payload as Record<string, unknown>).permissionDenials as string[] | undefined;
+      const p = signal.payload as Record<string, unknown>;
+      const denials = p.permissionDenials as string[] | undefined;
       if (denials) permissionDenials.push(...denials);
+      const details = p.denialDetails as DenialDetail[] | undefined;
+      if (details) denialDetails.push(...details);
     }
     if (signal.type === "cost") {
       cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
@@ -464,7 +473,13 @@ export async function spawnAndWait(
   }
 
   unsub();
-  return { output, cost, exitCode: result.exitCode, timedOut: result.timedOut, permissionDenials };
+
+  // Record denials in the ledger if provided
+  if (opts.ledger && permissionDenials.length > 0) {
+    opts.ledger.recordDenials(permissionDenials, opts.name, denialDetails);
+  }
+
+  return { output, cost, exitCode: result.exitCode, timedOut: result.timedOut, permissionDenials, denialDetails };
 }
 
 function parseGateVerdict(output: string, _gatePrompt: string): "DONE" | "ITERATE" {

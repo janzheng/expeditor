@@ -16,10 +16,11 @@ import {
 } from "@mxit/parser";
 
 import { SignalBus } from "./bus.ts";
-import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
+import { AgentSpawner, type SpawnOptions, type AgentType, type SandboxConfig, SANDBOX_PRESETS } from "./spawner.ts";
 import { Registry } from "./registry.ts";
 import { withTimeout } from "./timeout.ts";
 import { costGuard } from "./orchestrator.ts";
+import type { PermissionLedger } from "./permission-ledger.ts";
 
 export interface MxitRunnerOptions {
   /** Path to TASKS.md file */
@@ -44,6 +45,8 @@ export interface MxitRunnerOptions {
   recover?: boolean;
   /** Signal handler for live output */
   onSignal?: (signal: import("./types.ts").AgentSignal) => void;
+  /** Permission ledger for tracking denials and merging approvals */
+  ledger?: PermissionLedger;
 }
 
 export interface MxitRunResult {
@@ -113,10 +116,22 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
     parallel = false,
     budget = 10,
     worktree,
-    sandbox = "developer",
+    sandbox: sandboxRaw = "developer",
     recover = true,
     onSignal,
+    ledger,
   } = opts;
+
+  // Merge ledger approvals/rejections into sandbox
+  let sandbox: string | SandboxConfig = sandboxRaw;
+  if (ledger) {
+    const baseConfig = typeof sandboxRaw === "string"
+      ? SANDBOX_PRESETS[sandboxRaw]
+      : undefined;
+    if (baseConfig) {
+      sandbox = ledger.buildSandbox(baseConfig);
+    }
+  }
 
   // Set up infrastructure
   const logsDir = ".expo/logs";
@@ -165,7 +180,7 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
         // Fan-out: process all ready tasks in parallel
         const batch = ready.slice(0, maxTasks - processed);
         const batchResults = await processBatch(
-          batch, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox },
+          batch, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox, ledger },
         );
         results.push(...batchResults);
         totalCost += batchResults.reduce((sum, r) => sum + r.costUsd, 0);
@@ -174,7 +189,7 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
         // Sequential: process one task at a time
         const task = ready[0];
         const result = await processTask(
-          task, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox },
+          task, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox, ledger },
         );
         results.push(result);
         totalCost += result.costUsd;
@@ -200,7 +215,8 @@ interface ProcessOpts {
   model?: string;
   timeout: number;
   worktree?: boolean;
-  sandbox: string;
+  sandbox: string | SandboxConfig;
+  ledger?: PermissionLedger;
 }
 
 /**

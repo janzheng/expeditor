@@ -14,6 +14,7 @@ import { AgentSpawner, type SpawnOptions, type SandboxConfig, SANDBOX_PRESETS } 
 import { Registry } from "./registry.ts";
 import { spawnAndWait, costGuard, type SpawnResult } from "./orchestrator.ts";
 import { withTimeout } from "./timeout.ts";
+import type { PermissionLedger } from "./permission-ledger.ts";
 
 // --- Types ---
 
@@ -240,6 +241,8 @@ export interface WorkflowRunnerOptions {
   dryRun?: boolean;
   /** Timeout per agent in seconds (0 = no timeout, default: 600) */
   timeout?: number;
+  /** Permission ledger for tracking denials and merging approvals */
+  ledger?: PermissionLedger;
 }
 
 export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<WorkflowResult> {
@@ -252,11 +255,17 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
   }
 
   // Resolve sandbox to a config
-  const sandboxConfig = typeof spec.sandbox === "string"
+  let sandboxConfig = typeof spec.sandbox === "string"
     ? SANDBOX_PRESETS[spec.sandbox]
     : spec.sandbox;
   if (!sandboxConfig && typeof spec.sandbox === "string") {
     throw new Error(`Unknown sandbox preset: ${spec.sandbox}`);
+  }
+
+  // Merge ledger approvals/rejections into sandbox
+  if (opts.ledger && sandboxConfig) {
+    sandboxConfig = opts.ledger.buildSandbox(sandboxConfig);
+    spec.sandbox = sandboxConfig;
   }
 
   if (opts.dryRun) {
@@ -341,6 +350,7 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
       worktree: false,
       sandbox: spec.sandbox as string | SandboxConfig,
       timeout: opts.timeout,
+      ledger: opts.ledger,
     });
 
     synthesis = {

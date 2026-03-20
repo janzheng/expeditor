@@ -371,3 +371,316 @@ This closes the feedback loop: run → see what was blocked → update sandbox �
 - **No dangerous flags**: No `dangerously-skip-permissions`, no `acceptEdits`. Agents stay in default (tight) permission mode. The settings file is a scoped grant, not a blanket override.
 - **Automatic cleanup**: Temp settings files are deleted after each agent exits.
 - **Glob pattern support**: Uses Claude Code's native pattern syntax (`Bash(curl:*)`, `mcp__*`) for concise rules.
+
+## Permission Ledger — Learn & Report (2026-03-20)
+
+The sandbox system above is static: the workflow author declares permissions upfront, and if something gets denied, you see a yellow warning and move on. The **permission ledger** closes the feedback loop by persisting denials across runs and letting users approve patterns so subsequent runs don't hit the same walls.
+
+### The problem it solves
+
+The "detecting permission issues" section above described the feedback loop: run → see what was blocked → update sandbox → re-run. But "update sandbox" meant editing code — changing a preset or adding patterns to a custom sandbox config. For iterative workflows where you're discovering what permissions are needed, this is friction.
+
+The ledger automates the "update sandbox" step. Denials are recorded to a persistent JSON file. The user reviews them with a CLI command and approves/rejects. On the next run, approved patterns are merged into the sandbox config automatically.
+
+### Architecture
+
+```
+.expo/permissions.json          ← persistent ledger file
+        |
+        v
+PermissionLedger class          ← load/save, record denials, approve/reject
+        |
+        v
+ledger.buildSandbox(base)       ← merges approved → allow, rejected → deny
+        |
+        v
+SandboxConfig passed to spawner ← agent never knows the ledger exists
+```
+
+The ledger follows the same `Registry` pattern: JSON file on disk, `Map`-based in-memory store, `load()`/`save()`.
+
+### Data model
+
+```typescript
+interface PermissionEntry {
+  pattern: string;        // "Bash(git push:*)", "Write", "mcp__slack__send"
+  status: "approved" | "rejected" | "pending";
+  firstSeen: number;      // epoch ms
+  lastSeen: number;       // epoch ms
+  count: number;          // how many times denied
+  source?: string;        // which agent triggered it
+  examples?: DenialExample[];  // last 3 denied commands with context
+}
+
+interface DenialExample {
+  command?: string;       // "sudo ls /tmp"
+  description?: string;   // "List /tmp directory contents with sudo"
+  source?: string;        // "perm-test"
+  timestamp: number;
+}
+```
+
+### Raw denial format from Claude Code
+
+**Important discovery (2026-03-20):** Claude Code's `permission_denials` in the stream-json `result` event are **objects, not strings**. The original code assumed strings and stored `[object Object]` — completely useless.
+
+Actual format returned by Claude Code:
+
+```json
+{
+  "type": "result",
+  "permission_denials": [
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01YKkHcnVvqbGc84ZdC8HBMZ",
+      "tool_input": {
+        "command": "sudo ls /tmp",
+        "description": "List /tmp directory contents with sudo"
+      }
+    },
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01BBXGHxDrqbzjFb6oGXkeuB",
+      "tool_input": {
+        "command": "git status",
+        "description": "Show working tree status"
+      }
+    }
+  ]
+}
+```
+
+Each denial object contains:
+- `tool_name` — the tool category (`"Bash"`, `"Write"`, etc.)
+- `tool_use_id` — unique ID for this specific tool call
+- `tool_input` — the full input the agent tried to pass (for Bash: `command` + `description`)
+
+### How we normalize denials
+
+The adapter (`claude-adapter.ts`) converts each denial object into two things:
+
+1. **A pattern string** for matching/approval: `Bash(git:*)` (first word of command + glob)
+2. **A `DenialDetail` object** preserving the full context:
+
+```typescript
+interface DenialDetail {
+  pattern: string;       // "Bash(git:*)" — normalized for matching
+  toolName: string;      // "Bash" — raw tool name
+  command?: string;      // "git status" — full command string
+  description?: string;  // "Show working tree status" — agent's intent
+}
+```
+
+The pattern string flows into the ledger for approval/rejection. The detail flows into the ledger's `examples` array for display. Both travel through the signal bus as part of the done/failed payload.
+
+### How it flows
+
+**Run 1** — agent hits a denied tool:
+
+```
+$ expo spawn "push my code" --name pusher
+...
+✅ done (12.3s, 5 turns)
+
+⚠ Permission Denials (1 pending):
+  ✗ Bash(sudo:*)                   denied 1x   → pending
+    ↳ sudo ls /tmp (List /tmp directory contents with sudo)
+
+  Run expo permissions to review and approve for future runs.
+```
+
+Denials saved to `.expo/permissions.json` with full context:
+
+```json
+[
+  {
+    "pattern": "Bash(sudo:*)",
+    "status": "pending",
+    "firstSeen": 1774044751069,
+    "lastSeen": 1774044751069,
+    "count": 1,
+    "source": "perm-test",
+    "examples": [
+      {
+        "command": "sudo ls /tmp",
+        "description": "List /tmp directory contents with sudo",
+        "source": "perm-test",
+        "timestamp": 1774044751069
+      }
+    ]
+  }
+]
+```
+
+**Between runs** — user reviews with full context:
+
+```
+$ expo permissions
+
+Permission Ledger
+
+  ● Bash(sudo:*)                   pending  1x  (from: perm-test)
+    ↳ sudo ls /tmp (List /tmp directory contents with sudo)
+
+Approve:  expo permissions approve "<pattern>"
+Reject:   expo permissions reject "<pattern>"
+Reset:    expo permissions reset
+```
+
+The examples tell the user exactly what was attempted, not just the pattern. This matters when deciding whether to approve — `Bash(git:*)` with example `git status (Show working tree status)` is very different context from `Bash(git:*)` with example `git push --force origin main`.
+
+```
+$ expo permissions approve "Bash(sudo:*)"
+Approved: Bash(sudo:*)
+```
+
+**Run 2** — ledger merges approval into sandbox:
+
+```
+CLI loads ledger → ledger.buildSandbox(developerPreset) →
+  allow: [...developer defaults..., "Bash(sudo:*)"]
+  → spawner gets merged config → no more denial for that pattern
+```
+
+### `buildSandbox` — the key method
+
+Given a base preset, returns a new `SandboxConfig` with approved patterns added to `allow` and rejected patterns added to `deny`. Does not mutate the input.
+
+```typescript
+buildSandbox(base: SandboxConfig): SandboxConfig {
+  const allow = [...(base.allow ?? [])];
+  const deny = [...(base.deny ?? [])];
+
+  for (const entry of this.entries.values()) {
+    if (entry.status === "approved" && !allow.includes(entry.pattern)) {
+      allow.push(entry.pattern);
+    }
+    if (entry.status === "rejected" && !deny.includes(entry.pattern)) {
+      deny.push(entry.pattern);
+    }
+  }
+
+  return { ...base, allow, deny };
+}
+```
+
+This means the three-layer hierarchy still holds. The ledger operates at Layer 2 (harness-controlled). If a corporate `.claude/settings.json` denies a tool, approving it in the ledger won't override that — deny is still a one-way ratchet across layers.
+
+### CLI commands
+
+```
+expo permissions                    # list all entries
+expo permissions approve <pattern>  # approve for future runs
+expo permissions reject <pattern>   # explicitly deny for future runs
+expo permissions reset              # clear the ledger
+```
+
+### Where it's wired in
+
+| Command | How |
+|---------|-----|
+| `spawn` | Loads ledger, merges into `developer` preset, tracks denials from bus signals, saves + reports |
+| `workflow` | Passes ledger to `runWorkflow`, merges before spawning agents and synthesis |
+| `mxit` | Passes ledger to `runMxit`, merges before spawning task agents |
+| `orchestrator.spawnAndWait` | Accepts optional `ledger`, calls `recordDenials` on completion |
+
+All wiring is backward-compatible — `ledger` is optional everywhere. If you don't use the permissions system, nothing changes.
+
+### Design decisions
+
+**No subsumption logic.** If a user approves `Bash`, it won't auto-subsume `Bash(git:*)`. Claude Code's own pattern matching handles glob semantics. The ledger stores exactly what the user types.
+
+**No auto-approve.** The ledger never approves anything on its own. It records, the user decides, the next run applies. This is deliberate — headless agents shouldn't escalate their own permissions.
+
+**Last-write-wins for concurrent runs.** The JSON file doesn't do locking. If two runs finish simultaneously, the last one to save wins. But data converges because denials are additive (new patterns get added, counts increment, no data is deleted by a write).
+
+**`recordDenials` doesn't overwrite status.** If a pattern is already approved or rejected and the same denial comes in again, the count increments but the status stays. This prevents a re-run from resetting a user's decision back to pending.
+
+### Updated feedback loop
+
+```
+BEFORE (original sandbox):
+  run → see warning → edit code → re-run
+
+AFTER (with ledger):
+  run → see structured denial report → `expo permissions approve "X"` → re-run
+```
+
+The sandbox presets are still the right starting point. The ledger handles the edge cases where a preset is almost-but-not-quite right — you discover what's missing through actual runs rather than guessing upfront.
+
+### Data flow through the system
+
+```
+Claude Code result event
+  → { tool_name: "Bash", tool_input: { command: "git status", description: "..." } }
+
+claude-adapter.ts (normalize)
+  → pattern: "Bash(git:*)"
+  → DenialDetail: { pattern, toolName, command, description }
+
+Signal bus (done/failed payload)
+  → permissionDenials: ["Bash(git:*)"]          ← backward-compat strings
+  → denialDetails: [{ pattern, toolName, ... }]  ← rich objects
+
+orchestrator.spawnAndWait
+  → captures both from bus signals
+  → calls ledger.recordDenials(patterns, source, details)
+
+PermissionLedger
+  → stores pattern + status + count for matching
+  → stores last 3 examples with command/description for display
+
+CLI / TUI / web dashboard
+  → reads entries + examples for rich rendering
+```
+
+### Empirical sandbox testing (2026-03-20)
+
+Ran 19 Bash commands through the **research** sandbox preset (allows `Bash(mkdir:*)`, `Bash(ls:*)`, `Bash(cat:*)`, `Bash(head:*)`, `Bash(curl:*)`, `Bash(jq:*)`; denies `Bash(git:*)`, `Bash(gh:*)`, `Bash(sudo:*)`).
+
+| # | Command | Result | Category |
+|---|---------|--------|----------|
+| 1 | `ls /tmp` | BLOCKED | Directory sandbox — `/tmp` is outside project dir |
+| 2 | `mkdir -p /tmp/...` | BLOCKED | Directory sandbox |
+| 3 | `cat /etc/hostname` | BLOCKED | Directory sandbox |
+| 4 | `touch /tmp/...` | BLOCKED | Directory sandbox + not in allow list |
+| 5 | `sed 's/a/b/'` | BLOCKED | Not in allow list |
+| 6 | `awk 'BEGIN{...}'` | DENIED | Not in allow list — "requires approval" |
+| 7 | `find /tmp ...` | BLOCKED | Directory sandbox |
+| 8 | `chmod 644 ...` | DENIED | Not in allow list — "requires approval" |
+| 9 | `mv /tmp/...` | BLOCKED | Directory sandbox |
+| 10 | `cp /tmp/...` | BLOCKED | Directory sandbox |
+| 11 | `python3 --version` | **OK** | Auto-safe — Claude Code allows version checks |
+| 12 | `node --version` | **OK** | Auto-safe |
+| 13 | `git status` | DENIED | In deny list |
+| 14 | `git log --oneline -1` | DENIED | In deny list |
+| 15 | `curl httpbin.org/get` | **OK** | In allow list |
+| 16 | `jq --version` | **OK** | In allow list |
+| 17 | `rm /tmp/...` | BLOCKED | Directory sandbox |
+| 18 | `sudo ls /tmp` | DENIED | In deny list |
+| 19 | `echo "done"` | **OK** | Auto-safe |
+
+Also ran all 19 through the **developer** sandbox preset (allows `"Bash"` = all Bash). **Every command succeeded.** The blanket `"Bash"` pattern truly allows everything.
+
+#### Key findings
+
+**1. Claude Code has a directory sandbox independent of tool permissions.**
+
+`Bash(ls:*)` in the allow list does NOT override directory restrictions. `ls` within the project dir works; `ls /tmp` is blocked because `/tmp` is outside the allowed directory. This is a separate safety layer — not controlled by the `--settings` file.
+
+This means the `Bash(cmd:*)` patterns in the research preset are partially misleading: `Bash(ls:*)` approves the *tool*, but the *directory sandbox* may still block the command if it targets paths outside the project.
+
+**2. Some commands are auto-safe regardless of the allow list.**
+
+`python3 --version`, `node --version`, `echo`, `curl`, `jq` all worked without being in the allow list. Claude Code has built-in safe-listing for version checks and simple non-destructive commands. This is Layer 1 behavior.
+
+**3. "BLOCKED" vs "DENIED" are different failure modes.**
+
+- **BLOCKED** (directory sandbox): The command was approved at the tool level but Claude Code's directory sandbox prevented execution. Shows as "outside allowed directory" in the agent's output.
+- **DENIED** (tool permission): The command was not in the allow list and no human was present to approve. Shows as "requires approval (denied)" or "DENIED by user."
+
+Both show up in the `permission_denials` array in the result event. The ledger captures both, but only the DENIED cases (tool-level) can be resolved by approving patterns. BLOCKED cases (directory-level) require either running the command on project-local paths or a different approach entirely.
+
+**4. All 14 denied commands were captured in a single `permission_denials` array.**
+
+Claude Code collects every denial across the entire session and reports them all at once in the result event. There's no mid-stream denial signal — you only learn what was blocked after the agent finishes. The ledger's examples help users understand what happened without re-reading the full agent output.

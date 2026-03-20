@@ -59,18 +59,34 @@ export interface OutputPayload {
   text: string;
 }
 
+/** Rich detail about a single permission denial */
+export interface DenialDetail {
+  /** Normalized pattern, e.g. "Bash(git:*)", "Write" */
+  pattern: string;
+  /** Raw tool name from Claude Code */
+  toolName: string;
+  /** Full command string (for Bash) or description */
+  command?: string;
+  /** Agent-provided description of what it was trying to do */
+  description?: string;
+}
+
 export interface DonePayload {
   result: string;
   stopReason: string;
   durationMs: number;
   numTurns: number;
+  /** Normalized pattern strings (backward compat) */
   permissionDenials?: string[];
+  /** Rich denial details */
+  denialDetails?: DenialDetail[];
 }
 
 export interface FailedPayload {
   error: string;
   exitCode?: number;
   permissionDenials?: string[];
+  denialDetails?: DenialDetail[];
 }
 
 export interface CostPayload {

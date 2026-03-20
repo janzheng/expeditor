@@ -11,6 +11,7 @@
 import type {
   AgentSignal,
   CostPayload,
+  DenialDetail,
   DonePayload,
   FailedPayload,
   OutputPayload,
@@ -268,13 +269,36 @@ function handleResult(
     _raw: event,
   };
 
-  const permissionDenials = (event.permission_denials as string[]) ?? undefined;
+  // permission_denials can be strings or objects like { tool_name, tool_use_id, tool_input }
+  const rawDenials = (event.permission_denials as unknown[]) ?? undefined;
+  const denialDetails: DenialDetail[] | undefined = rawDenials?.map((d) => {
+    if (typeof d === "string") return { pattern: d, toolName: d };
+    if (d && typeof d === "object") {
+      const obj = d as Record<string, unknown>;
+      const toolName = obj.tool_name as string ?? "unknown";
+      const input = obj.tool_input as Record<string, unknown>;
+      if (toolName === "Bash" && input?.command) {
+        const fullCommand = String(input.command);
+        const cmd = fullCommand.split(/\s+/)[0];
+        return {
+          pattern: `Bash(${cmd}:*)`,
+          toolName,
+          command: fullCommand,
+          description: input.description as string | undefined,
+        };
+      }
+      return { pattern: toolName, toolName };
+    }
+    return { pattern: String(d), toolName: String(d) };
+  });
+  const permissionDenials = denialDetails?.map((d) => d.pattern);
 
   // Build done or failed signal
   if (isError) {
     const failedPayload: FailedPayload = {
       error: (event.result as string) ?? "Unknown error",
       permissionDenials,
+      denialDetails,
     };
     return [
       {
@@ -294,6 +318,7 @@ function handleResult(
     durationMs: (event.duration_ms as number) ?? 0,
     numTurns: (event.num_turns as number) ?? 0,
     permissionDenials,
+    denialDetails,
   };
 
   return [
