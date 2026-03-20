@@ -200,7 +200,7 @@ export class AgentSpawner {
     }
 
     if (agentType === "pi") {
-      const args = ["--mode", "json"];
+      const args = ["-p", "--mode", "json"];
       if (opts.model) args.push("--model", opts.model);
       if (opts.extraFlags) args.push(...opts.extraFlags);
       args.push(opts.prompt);
