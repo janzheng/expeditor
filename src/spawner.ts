@@ -10,10 +10,13 @@
 
 import { parseStreamJsonLine } from "./claude-adapter.ts";
 import { parseCodexLine } from "./codex-adapter.ts";
+import { parseOpenCodeLine } from "./opencode-adapter.ts";
+import { parsePiMonoLine } from "./pimono-adapter.ts";
+import { parseGenericLine } from "./generic-adapter.ts";
 import { SignalBus, lineStream } from "./bus.ts";
 import { Registry, type RegistryEntry } from "./registry.ts";
 
-export type AgentType = "claude" | "codex";
+export type AgentType = "claude" | "codex" | "opencode" | "pi" | "generic";
 
 /**
  * Sandbox configuration — the harness controls what the agent can do.
@@ -188,6 +191,31 @@ export class AgentSpawner {
       return { cmd: "codex", args };
     }
 
+    if (agentType === "opencode") {
+      const args = ["run", "--format", "json"];
+      if (opts.model) args.push("--model", opts.model);
+      if (opts.extraFlags) args.push(...opts.extraFlags);
+      args.push(opts.prompt);
+      return { cmd: "opencode", args };
+    }
+
+    if (agentType === "pi") {
+      const args = ["--mode", "json"];
+      if (opts.model) args.push("--model", opts.model);
+      if (opts.extraFlags) args.push(...opts.extraFlags);
+      args.push(opts.prompt);
+      return { cmd: "pi", args };
+    }
+
+    if (agentType === "generic") {
+      // Split prompt: first token is command, rest are args
+      const parts = opts.prompt.split(/\s+/);
+      const cmd = parts[0];
+      const cmdArgs = parts.slice(1);
+      if (opts.extraFlags) cmdArgs.push(...opts.extraFlags);
+      return { cmd, args: cmdArgs };
+    }
+
     // Default: claude
     const args = ["-p", "--output-format", "stream-json", "--verbose"];
     const useWorktree = opts.worktree !== false;
@@ -221,6 +249,15 @@ export class AgentSpawner {
   private getAdapter(agentType: AgentType, adapterOpts: { agentId: string; parentId?: string }) {
     if (agentType === "codex") {
       return (line: string) => parseCodexLine(line, adapterOpts);
+    }
+    if (agentType === "opencode") {
+      return (line: string) => parseOpenCodeLine(line, adapterOpts);
+    }
+    if (agentType === "pi") {
+      return (line: string) => parsePiMonoLine(line, adapterOpts);
+    }
+    if (agentType === "generic") {
+      return (line: string) => parseGenericLine(line, adapterOpts);
     }
     return (line: string) => parseStreamJsonLine(line, adapterOpts);
   }

@@ -2,7 +2,7 @@
 
 Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** Feature complete. 14 source files, ~3,200 lines. 24 tests. Codex + cross-model review + timeout watchdog working.
+**Status:** Feature complete. 16 source files, ~3,700 lines. 24 tests. 5 agent types (Claude, Codex, OpenCode, Pi-mono, generic).
 
 **Run tests:** `bash tests/phase0/run-all.sh` (13 pass) · `bash tests/phase1-2/run-all.sh` (11 pass)
 
@@ -65,9 +65,9 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
 
 ## Later
 
-- [ ] OpenCode adapter — `opencode run --format json` outputs structured JSON events, same pattern as Claude/Codex adapters #multi-agent
-- [ ] Pi-mono adapter — check if it has structured output mode, otherwise generic adapter covers it #multi-agent
-- [ ] Extend `AgentType` in spawner.ts: `"claude" | "codex" | "opencode" | "pi" | "generic"` #multi-agent
+- [x] [done: `src/opencode-adapter.ts` — maps step_start, tool_use, text, reasoning, step_finish, error] OpenCode adapter #multi-agent
+- [x] [done: `src/pimono-adapter.ts` — structured adapter, pi-mono has `--mode json` with typed events] Pi-mono adapter #multi-agent
+- [x] [done: `AgentType = "claude" | "codex" | "opencode" | "pi" | "generic"`, buildCommand + getAdapter for each] Extend AgentType #multi-agent
 - [ ] mxit integration — expo reads TASKS.md for ready work, spawns agents, updates tasks on completion #goal:fold-stack
 - [ ] Claude Code skill — `/expo review "prompt"` from inside Claude Code #goal:fold-stack
 
@@ -84,6 +84,8 @@ src/
 ├── types.ts            ~100 lines   Signal types + typed payloads
 ├── claude-adapter.ts   ~310 lines   stream-json → AgentSignal
 ├── codex-adapter.ts    ~130 lines   Codex --json → AgentSignal
+├── opencode-adapter.ts ~240 lines   OpenCode --format json → AgentSignal
+├── pimono-adapter.ts   ~250 lines   Pi-mono --mode json → AgentSignal
 ├── generic-adapter.ts   ~95 lines   Any CLI → lifecycle signals
 ├── bus.ts              ~120 lines   Multiplexer + JSONL logger
 ├── spawner.ts          ~310 lines   Spawn Claude/Codex, cleanup worktrees, worktree gate

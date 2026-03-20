@@ -10,7 +10,7 @@
  */
 
 import { SignalBus } from "./bus.ts";
-import { AgentSpawner, type SpawnOptions } from "./spawner.ts";
+import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
 import { Registry } from "./registry.ts";
 import { reviewLoop, race, ralph, costGuard, escalationRouter } from "./orchestrator.ts";
 import { parseWorkflow, buildAgentPrompt, runWorkflow } from "./workflow.ts";
@@ -135,7 +135,7 @@ async function cmdSpawn(args: string[]): Promise<void> {
   let name = "agent-" + crypto.randomUUID().slice(0, 8);
   let model: string | undefined;
   let worktree = true;
-  let agent: "claude" | "codex" = "claude";
+  let agent: AgentType = "claude";
   let timeout = 0; // 0 = no timeout for single spawn
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--name" && args[i + 1]) {
@@ -143,7 +143,7 @@ async function cmdSpawn(args: string[]): Promise<void> {
     } else if (args[i] === "--model" && args[i + 1]) {
       model = args[++i];
     } else if (args[i] === "--agent" && args[i + 1]) {
-      agent = args[++i] as "claude" | "codex";
+      agent = args[++i] as AgentType;
     } else if (args[i] === "--no-worktree") {
       worktree = false;
     } else if (args[i] === "--timeout" && args[i + 1]) {
@@ -443,9 +443,9 @@ async function cmdReview(args: string[]): Promise<void> {
     else if (args[i] === "--name" && args[i + 1]) name = args[++i];
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
     else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
-    else if (args[i] === "--work-agent" && args[i + 1]) workAgent = args[++i] as "claude" | "codex";
+    else if (args[i] === "--work-agent" && args[i + 1]) workAgent = args[++i] as AgentType;
     else if (args[i] === "--work-model" && args[i + 1]) workModel = args[++i];
-    else if (args[i] === "--review-agent" && args[i + 1]) reviewAgent = args[++i] as "claude" | "codex";
+    else if (args[i] === "--review-agent" && args[i + 1]) reviewAgent = args[++i] as AgentType;
     else if (args[i] === "--review-model" && args[i + 1]) reviewModel = args[++i];
   }
 
