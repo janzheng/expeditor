@@ -53,12 +53,19 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
   - [x] Auto-rotates when file exceeds limit (default 50MB)
   - [x] Keeps one `.old` backup
 
+## Later
+
+- [ ] OpenCode adapter — `opencode run --format json` outputs structured JSON events, same pattern as Claude/Codex adapters #multi-agent
+- [ ] Pi-mono adapter — check if it has structured output mode, otherwise generic adapter covers it #multi-agent
+- [ ] Extend `AgentType` in spawner.ts: `"claude" | "codex" | "opencode" | "pi" | "generic"` #multi-agent
+- [ ] mxit integration — expo reads TASKS.md for ready work, spawns agents, updates tasks on completion #goal:fold-stack
+- [ ] Claude Code skill — `/expo review "prompt"` from inside Claude Code #goal:fold-stack
+
 ## Discovered / Open Questions
 
 - [x] [decided: Phase 5, and it was easy — 130 lines] Codex adapter timing
 - [?] Is SQLite better than JSONL for the bus? Queryable but heavier. Start JSONL, upgrade if needed.
-- [?] Could this be a Claude Code skill? `/expo review "prompt"` from inside Claude Code
-- [*] Workshop deep dive: `subagent-signal-bus.md`
+- [*] Workshop deep dive: `.reduce/subagent-signal-bus.md`
 
 ## File Inventory
 
