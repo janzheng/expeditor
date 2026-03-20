@@ -167,7 +167,7 @@ async function saveLedgerAndReport(ledger: PermissionLedger): Promise<void> {
 async function cmdSpawn(args: string[]): Promise<void> {
   const prompt = args[0];
   if (!prompt) {
-    console.error("Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree] [--timeout <seconds>]");
+    console.error("Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree] [--timeout <seconds>] [--sandbox <preset>]");
     Deno.exit(1);
   }
 
@@ -177,6 +177,7 @@ async function cmdSpawn(args: string[]): Promise<void> {
   let worktree = true;
   let agent: AgentType = "claude";
   let timeout = 0; // 0 = no timeout for single spawn
+  let sandbox = "developer";
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--name" && args[i + 1]) {
       name = args[++i];
@@ -188,6 +189,8 @@ async function cmdSpawn(args: string[]): Promise<void> {
       worktree = false;
     } else if (args[i] === "--timeout" && args[i + 1]) {
       timeout = parseInt(args[++i]);
+    } else if (args[i] === "--sandbox" && args[i + 1]) {
+      sandbox = args[++i];
     }
   }
 
@@ -203,7 +206,12 @@ async function cmdSpawn(args: string[]): Promise<void> {
   await spawner.init();
 
   // Merge ledger approvals into sandbox
-  const baseSandbox = SANDBOX_PRESETS["developer"];
+  const baseSandbox = SANDBOX_PRESETS[sandbox];
+  if (!baseSandbox) {
+    console.error(`${RED}Unknown sandbox preset: ${sandbox}${RESET}`);
+    console.error(`Available: ${Object.keys(SANDBOX_PRESETS).join(", ")}`);
+    Deno.exit(1);
+  }
   const mergedSandbox = ledger.buildSandbox(baseSandbox);
 
   console.log(`${BOLD}Signal Bus${RESET}`);
@@ -1013,6 +1021,7 @@ ${BOLD}Spawn flags:${RESET}
   --model <model>           Model override
   --no-worktree             Run in current directory (no isolation)
   --timeout <seconds>       Kill agent after N seconds (0 = no timeout)
+  --sandbox <preset>        Sandbox preset (permissive|research|developer, default: developer)
 
 ${BOLD}Examples:${RESET}
   sigbus spawn "implement auth" --name auth-agent
