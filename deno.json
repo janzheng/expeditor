@@ -1,4 +1,7 @@
 {
+  "name": "@sigbus/expo",
+  "version": "0.1.0",
+  "exports": "./src/cli.ts",
   "imports": {
     "@mxit/parser": "../mxit/src/mod.ts"
   },
@@ -9,7 +12,9 @@
     "tmux": "deno run --allow-all src/tmux-consumer.ts",
     "test": "bash tests/phase1-2/run-all.sh",
     "test:phase0": "bash tests/phase0/run-all.sh",
-    "test:all": "bash tests/phase0/run-all.sh && bash tests/phase1-2/run-all.sh"
+    "test:all": "bash tests/phase0/run-all.sh && bash tests/phase1-2/run-all.sh",
+    "install": "deno compile --allow-all --output ~/.deno/bin/expo src/cli.ts && echo 'Installed: expo → ~/.deno/bin/expo'",
+    "uninstall": "rm -f ~/.deno/bin/expo && echo 'Removed: ~/.deno/bin/expo'"
   },
   "compilerOptions": {
     "jsx": "react-jsx",

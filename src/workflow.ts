@@ -295,6 +295,20 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
     sandbox: spec.sandbox as string | SandboxConfig,
   }));
 
+  // Track per-agent costs and denials from bus signals
+  const agentCosts = new Map<string, number>();
+  const agentDenials = new Map<string, string[]>();
+  const costUnsub = bus.subscribe((signal) => {
+    if (signal.type === "cost") {
+      const cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
+      agentCosts.set(signal.agentId, cost);
+    }
+    if (signal.type === "done" || signal.type === "failed") {
+      const denials = (signal.payload as Record<string, unknown>).permissionDenials as string[] | undefined;
+      if (denials) agentDenials.set(signal.agentId, denials);
+    }
+  });
+
   const spawnedAgents = await spawner.spawnAll(spawnOpts);
 
   // Wait for all to complete (with timeout protection)
@@ -303,19 +317,19 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
     spawnedAgents.map((a) => withTimeout(a.process, a.done, { timeoutMs })),
   );
 
+  costUnsub();
+
   // Collect results
   const agentResults: AgentResult[] = [];
   let totalCost = 0;
 
   for (let i = 0; i < spawnedAgents.length; i++) {
-    const agent = spawnedAgents[i];
     const settled = settledResults[i];
     const name = spec.agents[i].name;
 
-    // Get cost and permission denials from bus signals
-    let cost = 0;
+    const cost = agentCosts.get(name) ?? 0;
+    const permissionDenials = agentDenials.get(name) ?? [];
     let output = "";
-    const permissionDenials: string[] = [];
 
     // Read the output file if agent succeeded
     const outputDir = spec.output?.match(/`([^`]+)`/)?.[1]?.replace(/\/[^/]+$/, "") ?? ".expo/output";

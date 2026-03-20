@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-run --allow-read --allow-write --allow-env
+#!/usr/bin/env -S deno run --allow-all
 
 /**
  * Signal Bus CLI — Spawn agents, watch signals, manage worktrees
@@ -776,7 +776,8 @@ async function cmdWorkflow(args: string[]): Promise<void> {
     const status = agent.status === "success"
       ? `${GREEN}success${RESET}`
       : `${RED}failed (${agent.exitCode})${RESET}`;
-    console.log(`  ${agent.name}: ${status}`);
+    const costStr = agent.cost > 0 ? ` ${DIM}$${agent.cost.toFixed(4)}${RESET}` : "";
+    console.log(`  ${agent.name}: ${status}${costStr}`);
     if (agent.permissionDenials.length > 0) {
       console.log(`    ${YELLOW}⚠ Permission denials: ${agent.permissionDenials.join(", ")}${RESET}`);
     }
@@ -791,7 +792,12 @@ async function cmdWorkflow(args: string[]): Promise<void> {
   }
 
   console.log("");
-  console.log(`  Total cost: $${result.totalCostUsd.toFixed(4)}`);
+  const agentCost = result.agents.reduce((sum, a) => sum + a.cost, 0);
+  const synthCost = result.synthesis?.cost ?? 0;
+  console.log(`  ${BOLD}Cost breakdown${RESET}:`);
+  console.log(`    Agents:    $${agentCost.toFixed(4)}`);
+  if (synthCost > 0) console.log(`    Synthesis: $${synthCost.toFixed(4)}`);
+  console.log(`    ${BOLD}Total:     $${result.totalCostUsd.toFixed(4)}${RESET}`);
 
   await saveLedgerAndReport(ledger);
 }
