@@ -11,7 +11,15 @@ echo "=== T07: Race ==="
 rm -f "$PROJECT_ROOT/.sigbus/registry.json"
 
 cd "$PROJECT_ROOT"
-OUTPUT=$(deno run --allow-all src/cli.ts race "Name 3 fruits" vs "Name 3 vegetables" --criteria "which list is more nutritious" --name t07-race 2>&1)
+
+# Clean up stale worktrees/branches from prior runs
+deno run --allow-all src/cli.ts cleanup --all > /dev/null 2>&1 || true
+for b in $(git branch --list 'worktree-t07-race-*' 2>/dev/null | tr -d ' +*'); do
+  git worktree remove ".claude/worktrees/${b#worktree-}" --force 2>/dev/null || true
+  git branch -D "$b" 2>/dev/null || true
+done
+
+OUTPUT=$(deno run --allow-all src/cli.ts race "Name 3 fruits" vs "Name 3 vegetables" --criteria "which list is more nutritious" --name t07-race --timeout 30 2>&1)
 echo "$OUTPUT" > "$RESULTS_DIR/t07-race-output.txt"
 
 # Both branches should run

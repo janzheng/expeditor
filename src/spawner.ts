@@ -15,6 +15,81 @@ import { Registry, type RegistryEntry } from "./registry.ts";
 
 export type AgentType = "claude" | "codex";
 
+/**
+ * Sandbox configuration — the harness controls what the agent can do.
+ * Generates a temporary settings file passed via --settings.
+ *
+ * Use a preset string for common patterns, or a full SandboxConfig for custom rules.
+ *   sandbox: "permissive"  — allow everything except destructive ops
+ *   sandbox: "research"    — read/write/web/search, no git/rm
+ *   sandbox: "developer"   — full dev workflow including git, no force-push/reset
+ *   sandbox: { allow: [...], deny: [...] }  — custom rules
+ */
+export interface SandboxConfig {
+  /** Tools/patterns to auto-approve (e.g. "Read", "Write", "Bash(curl:*)", "WebFetch") */
+  allow?: string[];
+  /** Tools/patterns to deny outright */
+  deny?: string[];
+  /** Additional directories the agent can access */
+  addDirs?: string[];
+}
+
+/**
+ * Preset sandbox configurations.
+ *
+ * Key discovery: "Bash" (no parens) allows ALL Bash commands.
+ * No need to enumerate Bash(git:*), Bash(curl:*), etc.
+ * Claude Code's hardcoded safety layer (Layer 1) still blocks
+ * truly destructive operations regardless of what we allow here.
+ */
+export const SANDBOX_PRESETS: Record<string, SandboxConfig> = {
+  /**
+   * Auto-approve everything. The "stop asking me" mode.
+   * 12 entries cover all tools. No deny list — Claude Code's
+   * hardcoded safety layer handles the truly dangerous stuff.
+   */
+  permissive: {
+    allow: [
+      "Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit",
+      "WebSearch", "WebFetch",
+      "Bash",
+      "Agent", "Task", "TaskOutput", "ToolSearch", "Skill",
+      "mcp__*",
+    ],
+  },
+
+  /** Research workflow — web + files, no git or system commands */
+  research: {
+    allow: [
+      "Read", "Write", "Edit", "Glob", "Grep",
+      "WebSearch", "WebFetch",
+      "Bash(mkdir:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(curl:*)", "Bash(jq:*)",
+      "ToolSearch",
+      "mcp__*",
+    ],
+    deny: [
+      "Bash(git:*)", "Bash(gh:*)", "Bash(sudo:*)",
+    ],
+  },
+
+  /** Full dev workflow — all tools, deny only the most destructive git ops */
+  developer: {
+    allow: [
+      "Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit",
+      "WebSearch", "WebFetch",
+      "Bash",
+      "Agent", "Task", "TaskOutput", "ToolSearch", "Skill",
+      "mcp__*",
+    ],
+    deny: [
+      "Bash(git push --force:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(sudo:*)",
+    ],
+  },
+};
+
 export interface SpawnOptions {
   prompt: string;
   /** Worktree name (also used as default agentId) */
@@ -33,6 +108,14 @@ export interface SpawnOptions {
   model?: string;
   /** Use worktree isolation (default: true) */
   worktree?: boolean;
+  /** Harness-controlled sandbox — preset name or custom config */
+  sandbox?: SandboxConfig | keyof typeof SANDBOX_PRESETS;
+  /** Permission mode (default: "default"). Prefer sandbox for harness-controlled permissions. */
+  permissionMode?: "acceptEdits" | "bypassPermissions" | "default" | "plan";
+  /** Tools to allow without prompting (legacy — prefer sandbox.allow) */
+  allowedTools?: string[];
+  /** Timeout in seconds (0 = no timeout). Applied at orchestration layer, not spawn. */
+  timeout?: number;
   /** Extra flags */
   extraFlags?: string[];
 }
@@ -66,8 +149,34 @@ export class AgentSpawner {
     return this.registry;
   }
 
+  /** Generate a temporary settings file for harness-controlled sandboxing */
+  private async generateSettingsFile(sandbox: SandboxConfig, agentId: string): Promise<string> {
+    const settings: Record<string, unknown> = {
+      permissions: {
+        allow: sandbox.allow ?? [],
+        deny: sandbox.deny ?? [],
+      },
+    };
+
+    // Write to a temp file in the OS temp dir
+    const tmpDir = await Deno.makeTempDir({ prefix: "expo-sandbox-" });
+    const settingsPath = `${tmpDir}/${agentId}-settings.json`;
+    await Deno.writeTextFile(settingsPath, JSON.stringify(settings, null, 2));
+    return settingsPath;
+  }
+
+  /** Clean up a temporary settings file */
+  private async cleanupSettingsFile(settingsPath: string): Promise<void> {
+    try {
+      const dir = settingsPath.replace(/\/[^/]+$/, "");
+      await Deno.remove(dir, { recursive: true });
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+
   /** Build command args for a specific agent type */
-  private buildCommand(opts: SpawnOptions & { sessionId: string; cwd: string }): { cmd: string; args: string[] } {
+  private buildCommand(opts: SpawnOptions & { sessionId: string; cwd: string; settingsPath?: string }): { cmd: string; args: string[]; stdinPrompt?: string } {
     const agentType = opts.agent ?? "claude";
 
     if (agentType === "codex") {
@@ -86,7 +195,24 @@ export class AgentSpawner {
     args.push("--session-id", opts.sessionId);
     if (opts.label) args.push("--name", opts.label);
     if (opts.model) args.push("--model", opts.model);
+
+    // Harness-controlled sandbox via --settings file (preferred)
+    if (opts.settingsPath) {
+      args.push("--settings", opts.settingsPath);
+    }
+
+    // Legacy: direct permission mode
+    if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
+
     if (opts.extraFlags) args.push(...opts.extraFlags);
+
+    // --allowedTools is variadic and swallows positional args after it,
+    // so when it's used we pipe the prompt via stdin instead.
+    if (opts.allowedTools?.length) {
+      args.push("--allowedTools", ...opts.allowedTools);
+      return { cmd: "claude", args, stdinPrompt: opts.prompt };
+    }
+
     args.push(opts.prompt);
     return { cmd: "claude", args };
   }
@@ -106,16 +232,34 @@ export class AgentSpawner {
     const cwd = opts.cwd ?? this.baseCwd;
     const agentType = opts.agent ?? "claude";
 
-    const { cmd, args } = this.buildCommand({ ...opts, sessionId, cwd });
+    // Generate harness-controlled sandbox settings file if configured
+    let settingsPath: string | undefined;
+    if (opts.sandbox && agentType === "claude") {
+      const sandbox = typeof opts.sandbox === "string"
+        ? SANDBOX_PRESETS[opts.sandbox]
+        : opts.sandbox;
+      if (!sandbox) throw new Error(`Unknown sandbox preset: ${opts.sandbox}`);
+      settingsPath = await this.generateSettingsFile(sandbox, agentId);
+    }
+
+    const { cmd, args, stdinPrompt } = this.buildCommand({ ...opts, sessionId, cwd, settingsPath });
 
     const command = new Deno.Command(cmd, {
       args,
       cwd,
+      stdin: stdinPrompt ? "piped" : "null",
       stdout: "piped",
       stderr: "piped",
     });
 
     const process = command.spawn();
+
+    // Pipe prompt via stdin when --allowedTools is used (variadic flag eats positional args)
+    if (stdinPrompt && process.stdin) {
+      const writer = process.stdin.getWriter();
+      await writer.write(new TextEncoder().encode(stdinPrompt));
+      await writer.close();
+    }
 
     // Register (persist to disk)
     const useWorktree = agentType === "claude" && opts.worktree !== false;
@@ -184,6 +328,11 @@ export class AgentSpawner {
 
       const newStatus = exitCode === 0 ? "done" as const : "failed" as const;
 
+      // Clean up harness sandbox settings file
+      if (settingsPath) {
+        await this.cleanupSettingsFile(settingsPath);
+      }
+
       await this.registry.update(agentId, {
         status: newStatus,
         exitCode,
@@ -204,11 +353,44 @@ export class AgentSpawner {
     return { agentId, sessionId, process, done };
   }
 
-  /** Spawn multiple agents in parallel */
+  /**
+   * Spawn multiple agents.
+   * Agents are spawned sequentially with a worktree-readiness gate to avoid a
+   * Claude CLI race condition where concurrent --worktree creation causes one
+   * process to die silently (empty stdout, never closes fd).
+   * After spawning, all agents run concurrently — only the setup is serialized.
+   */
   async spawnAll(
     tasks: SpawnOptions[],
   ): Promise<SpawnedAgent[]> {
-    return Promise.all(tasks.map((t) => this.spawn(t)));
+    const agents: SpawnedAgent[] = [];
+    for (const t of tasks) {
+      const agent = await this.spawn(t);
+      // If using worktrees, wait for the worktree directory to be created
+      // before spawning the next agent. Claude CLI creates the worktree
+      // asynchronously after process.spawn() returns.
+      const usesWorktree = (t.agent ?? "claude") === "claude" && t.worktree !== false;
+      if (usesWorktree) {
+        const wtPath = `${t.cwd ?? this.baseCwd}/.claude/worktrees/${t.name}`;
+        await this.waitForPath(wtPath, 15000);
+      }
+      agents.push(agent);
+    }
+    return agents;
+  }
+
+  /** Wait for a path to exist (poll-based, for worktree readiness) */
+  private async waitForPath(path: string, timeoutMs: number): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        await Deno.stat(path);
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+    console.warn(`[spawner] worktree path not ready after ${timeoutMs}ms: ${path}`);
   }
 
   /** Clean up a worktree for a finished agent */

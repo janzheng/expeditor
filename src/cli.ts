@@ -13,7 +13,16 @@ import { SignalBus } from "./bus.ts";
 import { AgentSpawner, type SpawnOptions } from "./spawner.ts";
 import { Registry } from "./registry.ts";
 import { reviewLoop, race, ralph, costGuard, escalationRouter } from "./orchestrator.ts";
+import { parseWorkflow, buildAgentPrompt, runWorkflow } from "./workflow.ts";
+import { withTimeout } from "./timeout.ts";
 import type { AgentSignal } from "./types.ts";
+
+// --- Paths ---
+const EXPO_DIR = ".expo";
+const LOGS_DIR = `${EXPO_DIR}/logs`;
+
+// Ensure logs directory exists
+await Deno.mkdir(LOGS_DIR, { recursive: true }).catch(() => {});
 
 // --- Colors ---
 const RESET = "\x1b[0m";
@@ -118,7 +127,7 @@ function formatToolInput(tool: string, input: Record<string, unknown>): string {
 async function cmdSpawn(args: string[]): Promise<void> {
   const prompt = args[0];
   if (!prompt) {
-    console.error("Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree]");
+    console.error("Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree] [--timeout <seconds>]");
     Deno.exit(1);
   }
 
@@ -127,6 +136,7 @@ async function cmdSpawn(args: string[]): Promise<void> {
   let model: string | undefined;
   let worktree = true;
   let agent: "claude" | "codex" = "claude";
+  let timeout = 0; // 0 = no timeout for single spawn
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--name" && args[i + 1]) {
       name = args[++i];
@@ -136,10 +146,12 @@ async function cmdSpawn(args: string[]): Promise<void> {
       agent = args[++i] as "claude" | "codex";
     } else if (args[i] === "--no-worktree") {
       worktree = false;
+    } else if (args[i] === "--timeout" && args[i + 1]) {
+      timeout = parseInt(args[++i]);
     }
   }
 
-  const logFile = `bus-${Date.now()}.jsonl`;
+  const logFile = `${LOGS_DIR}/bus-${Date.now()}.jsonl`;
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
@@ -163,9 +175,14 @@ async function cmdSpawn(args: string[]): Promise<void> {
     worktree,
   });
 
-  const result = await spawnedAgent.done;
+  const timeoutMs = timeout > 0 ? timeout * 1000 : undefined;
+  const result = await withTimeout(spawnedAgent.process, spawnedAgent.done, { timeoutMs });
   console.log("");
-  console.log(`${BOLD}Exit${RESET}: ${result.exitCode === 0 ? GREEN + "success" : RED + "failed"} (code ${result.exitCode})${RESET}`);
+  if (result.timedOut) {
+    console.log(`${BOLD}Exit${RESET}: ${RED}timed out after ${timeout}s${RESET} (code ${result.exitCode})`);
+  } else {
+    console.log(`${BOLD}Exit${RESET}: ${result.exitCode === 0 ? GREEN + "success" : RED + "failed"} (code ${result.exitCode})${RESET}`);
+  }
   console.log(`${DIM}Session: ${spawnedAgent.sessionId}${RESET}`);
   if (agent === "claude") {
     console.log(`${DIM}Resume:  claude --resume ${spawnedAgent.sessionId}${RESET}`);
@@ -188,7 +205,13 @@ async function cmdSpawnAll(args: string[]): Promise<void> {
 
   const tasks: SpawnOptions[] = JSON.parse(await Deno.readTextFile(tasksFile));
 
-  const logFile = `bus-${Date.now()}.jsonl`;
+  // Parse optional --timeout flag from remaining args
+  let timeout = 0;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+  }
+
+  const logFile = `${LOGS_DIR}/bus-${Date.now()}.jsonl`;
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
@@ -203,8 +226,11 @@ async function cmdSpawnAll(args: string[]): Promise<void> {
 
   const agents = await spawner.spawnAll(tasks);
 
-  // Wait for all to finish
-  const results = await Promise.allSettled(agents.map((a) => a.done));
+  // Wait for all to finish (with timeout protection)
+  const timeoutMs = timeout > 0 ? timeout * 1000 : undefined;
+  const results = await Promise.allSettled(
+    agents.map((a) => withTimeout(a.process, a.done, { timeoutMs })),
+  );
 
   console.log("");
   console.log(`${BOLD}=== Results ===${RESET}`);
@@ -290,7 +316,7 @@ async function cmdResume(args: string[]): Promise<void> {
     ];
     if (prompt) resumeArgs.push(prompt);
 
-    const logFile = `bus-resume-${Date.now()}.jsonl`;
+    const logFile = `${LOGS_DIR}/bus-resume-${Date.now()}.jsonl`;
     const bus = new SignalBus({ logFile });
     await bus.init();
     bus.subscribe(printSignal);
@@ -399,13 +425,14 @@ async function cmdCleanup(args: string[]): Promise<void> {
 async function cmdReview(args: string[]): Promise<void> {
   const prompt = args[0];
   if (!prompt) {
-    console.error("Usage: cli.ts review <prompt> [--max <N>] [--work-agent claude|codex] [--review-agent claude|codex]");
+    console.error("Usage: cli.ts review <prompt> [--max <N>] [--timeout <seconds>] [--work-agent claude|codex] [--review-agent claude|codex]");
     Deno.exit(1);
   }
 
   let maxIterations = 3;
   let name = "review";
   let model: string | undefined;
+  let timeout: number | undefined;
   let workAgent: "claude" | "codex" | undefined;
   let workModel: string | undefined;
   let reviewAgent: "claude" | "codex" | undefined;
@@ -415,13 +442,14 @@ async function cmdReview(args: string[]): Promise<void> {
     if (args[i] === "--max" && args[i + 1]) maxIterations = parseInt(args[++i]);
     else if (args[i] === "--name" && args[i + 1]) name = args[++i];
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
     else if (args[i] === "--work-agent" && args[i + 1]) workAgent = args[++i] as "claude" | "codex";
     else if (args[i] === "--work-model" && args[i + 1]) workModel = args[++i];
     else if (args[i] === "--review-agent" && args[i + 1]) reviewAgent = args[++i] as "claude" | "codex";
     else if (args[i] === "--review-model" && args[i + 1]) reviewModel = args[++i];
   }
 
-  const logFile = `bus-review-${Date.now()}.jsonl`;
+  const logFile = `${LOGS_DIR}/bus-review-${Date.now()}.jsonl`;
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
@@ -448,6 +476,7 @@ async function cmdReview(args: string[]): Promise<void> {
     maxIterations,
     name,
     model,
+    timeout,
     workAgent: workAgent,
     workModel: workModel,
     reviewAgent: reviewAgent,
@@ -466,11 +495,12 @@ async function cmdReview(args: string[]): Promise<void> {
 }
 
 async function cmdRace(args: string[]): Promise<void> {
-  // Parse: race "prompt1" vs "prompt2" [--criteria "..."] [--name prefix]
+  // Parse: race "prompt1" vs "prompt2" [--criteria "..."] [--name prefix] [--timeout <seconds>]
   const prompts: string[] = [];
   let criteria: string | undefined;
   let name = "race";
   let model: string | undefined;
+  let timeout: number | undefined;
 
   let i = 0;
   while (i < args.length) {
@@ -478,6 +508,7 @@ async function cmdRace(args: string[]): Promise<void> {
     if (args[i] === "--criteria" && args[i + 1]) { criteria = args[++i]; i++; continue; }
     if (args[i] === "--name" && args[i + 1]) { name = args[++i]; i++; continue; }
     if (args[i] === "--model" && args[i + 1]) { model = args[++i]; i++; continue; }
+    if (args[i] === "--timeout" && args[i + 1]) { timeout = parseInt(args[++i]); i++; continue; }
     prompts.push(args[i]);
     i++;
   }
@@ -487,7 +518,7 @@ async function cmdRace(args: string[]): Promise<void> {
     Deno.exit(1);
   }
 
-  const logFile = `bus-race-${Date.now()}.jsonl`;
+  const logFile = `${LOGS_DIR}/bus-race-${Date.now()}.jsonl`;
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
@@ -504,7 +535,7 @@ async function cmdRace(args: string[]): Promise<void> {
   console.log(`  Log: ${logFile}`);
   console.log("");
 
-  const result = await race(bus, spawner, { prompts, criteria, name, model });
+  const result = await race(bus, spawner, { prompts, criteria, name, model, timeout });
   await bus.close();
 
   console.log("");
@@ -531,14 +562,16 @@ async function cmdRalph(args: string[]): Promise<void> {
   let review = false;
   let name = "ralph";
   let model: string | undefined;
+  let timeout: number | undefined;
   for (let i = 2; i < args.length; i++) {
     if (args[i] === "--max" && args[i + 1]) maxTasks = parseInt(args[++i]);
     else if (args[i] === "--review") review = true;
     else if (args[i] === "--name" && args[i + 1]) name = args[++i];
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
   }
 
-  const logFile = `bus-ralph-${Date.now()}.jsonl`;
+  const logFile = `${LOGS_DIR}/bus-ralph-${Date.now()}.jsonl`;
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
@@ -570,6 +603,7 @@ async function cmdRalph(args: string[]): Promise<void> {
     review,
     name,
     model,
+    timeout,
   });
 
   unguard();
@@ -581,6 +615,98 @@ async function cmdRalph(args: string[]): Promise<void> {
   console.log(`  Verdict: ${result.verdict === "DONE" ? GREEN : YELLOW}${result.verdict}${RESET}`);
   console.log(`  Tasks completed: ${result.tasksCompleted}`);
   console.log(`  Cost: $${result.totalCostUsd.toFixed(4)}`);
+}
+
+async function cmdWorkflow(args: string[]): Promise<void> {
+  const workflowFile = args[0];
+  if (!workflowFile) {
+    console.error("Usage: cli.ts workflow <file.md> [--model <model>] [--budget <N>] [--timeout <seconds>] [--dry-run] [--sandbox <preset>]");
+    Deno.exit(1);
+  }
+
+  // Parse flags
+  let model: string | undefined;
+  let budget = 10;
+  let dryRun = false;
+  let sandboxOverride: string | undefined;
+  let timeout: number | undefined;
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--budget" && args[i + 1]) budget = parseFloat(args[++i]);
+    else if (args[i] === "--dry-run") dryRun = true;
+    else if (args[i] === "--sandbox" && args[i + 1]) sandboxOverride = args[++i];
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+  }
+
+  // Parse the workflow for display
+  let markdown: string;
+  try {
+    markdown = await Deno.readTextFile(workflowFile);
+  } catch {
+    console.error(`${RED}Error${RESET}: Cannot read workflow file: ${workflowFile}`);
+    Deno.exit(1);
+  }
+
+  let spec;
+  try {
+    spec = parseWorkflow(markdown);
+  } catch (err) {
+    console.error(`${RED}Error${RESET}: ${(err as Error).message}`);
+    Deno.exit(1);
+  }
+
+  console.log(`${BOLD}Workflow${RESET}: ${workflowFile}`);
+  if (spec.goal) console.log(`  Goal: ${spec.goal.slice(0, 80)}${spec.goal.length > 80 ? "..." : ""}`);
+  console.log(`  Agents: ${spec.agents.map((a) => a.name).join(", ")}`);
+  console.log(`  Sandbox: ${typeof spec.sandbox === "string" ? spec.sandbox : "custom"}${sandboxOverride ? ` → ${sandboxOverride}` : ""}`);
+  console.log(`  Budget: $${budget}`);
+  if (spec.output) console.log(`  Output: ${spec.output}`);
+  console.log("");
+
+  if (dryRun) {
+    console.log(`${BOLD}=== Dry Run ===${RESET}`);
+    console.log("");
+    for (const agent of spec.agents) {
+      console.log(`${CYAN}### ${agent.name}${RESET}`);
+      const prompt = buildAgentPrompt(spec, agent);
+      console.log(`${DIM}${prompt.slice(0, 300)}${prompt.length > 300 ? "..." : ""}${RESET}`);
+      console.log("");
+    }
+    console.log(`${GREEN}Validation passed.${RESET} Remove --dry-run to execute.`);
+    return;
+  }
+
+  const result = await runWorkflow({
+    workflowPath: workflowFile,
+    model,
+    budget,
+    sandboxOverride,
+    timeout,
+  });
+
+  console.log("");
+  console.log(`${BOLD}=== Workflow Results ===${RESET}`);
+  for (const agent of result.agents) {
+    const status = agent.status === "success"
+      ? `${GREEN}success${RESET}`
+      : `${RED}failed (${agent.exitCode})${RESET}`;
+    console.log(`  ${agent.name}: ${status}`);
+    if (agent.permissionDenials.length > 0) {
+      console.log(`    ${YELLOW}⚠ Permission denials: ${agent.permissionDenials.join(", ")}${RESET}`);
+    }
+  }
+
+  if (result.synthesis) {
+    console.log("");
+    console.log(`  ${GREEN}Synthesis${RESET}: completed ($${result.synthesis.cost.toFixed(4)})`);
+  } else if (result.agents.every((a) => a.status === "failed")) {
+    console.log("");
+    console.log(`  ${RED}Synthesis skipped${RESET}: all agents failed`);
+  }
+
+  console.log("");
+  console.log(`  Total cost: $${result.totalCostUsd.toFixed(4)}`);
 }
 
 // --- Main ---
@@ -624,6 +750,10 @@ switch (command) {
     await cmdRalph(args);
     break;
 
+  case "workflow":
+    await cmdWorkflow(args);
+    break;
+
   case "watch": {
     // Delegate to watch.ts
     const watchCmd = new Deno.Command("deno", {
@@ -653,11 +783,13 @@ ${BOLD}Commands:${RESET}
   cleanup --all             Clean up all finished agents
   review <prompt>           Review loop: work → review → gate (DONE/ITERATE)
   race "A" vs "B" [flags]  Race branches in parallel, pick winner
+  workflow <file.md>        Run a markdown workflow (agents + synthesis)
 
 ${BOLD}Spawn flags:${RESET}
   --name <name>             Agent name (also worktree name)
   --model <model>           Model override
   --no-worktree             Run in current directory (no isolation)
+  --timeout <seconds>       Kill agent after N seconds (0 = no timeout)
 
 ${BOLD}Examples:${RESET}
   sigbus spawn "implement auth" --name auth-agent

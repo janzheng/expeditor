@@ -2,7 +2,7 @@
 
 Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** Feature complete. 12 source files, ~2,800 lines. 24 tests. Codex + cross-model review working.
+**Status:** Feature complete. 14 source files, ~3,200 lines. 24 tests. Codex + cross-model review + timeout watchdog working.
 
 **Run tests:** `bash tests/phase0/run-all.sh` (13 pass) · `bash tests/phase1-2/run-all.sh` (11 pass)
 
@@ -52,6 +52,16 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
   - [x] Strips `_raw` from logged signals to save ~50% disk space
   - [x] Auto-rotates when file exceeds limit (default 50MB)
   - [x] Keeps one `.old` backup
+- [x] [done: `src/timeout.ts` + wired into orchestrator, workflow, cli] Agent timeout & process watchdog #reliability
+  - [x] `withTimeout()` helper: races `agent.done` against timer, SIGTERM → grace period → SIGKILL
+  - [x] Wired into `spawnAndWait` (default 600s), `race`, `reviewLoop`, `ralph`, `runWorkflow`
+  - [x] `--timeout <seconds>` CLI flag on all commands (spawn, spawn-all, review, race, ralph, workflow)
+  - [x] `timedOut: boolean` on `SpawnResult`, emits `failed` signal with `timedOut: true`
+  - [x] Timer cleanup in `finally` blocks prevents Deno exit hangs
+- [x] [fixed: serialize spawns + poll-wait for worktree dir before next spawn] Concurrent worktree race condition #reliability
+  - [x] Root cause: Claude CLI creates worktrees async after process start; concurrent `--worktree` causes one process to die silently (zero stdout, never closes fd)
+  - [x] `spawnAll` now spawns sequentially with worktree-readiness gate
+  - [x] t07-race test updated: pre-cleanup of stale branches + `--timeout 30`
 
 ## Later
 
@@ -64,7 +74,7 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
 ## Discovered / Open Questions
 
 - [x] [decided: Phase 5, and it was easy — 130 lines] Codex adapter timing
-- [?] Is SQLite better than JSONL for the bus? Queryable but heavier. Start JSONL, upgrade if needed.
+- [x] [decided: JSONL — more readable, good enough perf. SQLite queryable but not worth the complexity] Bus storage format
 - [*] Workshop deep dive: `.reduce/subagent-signal-bus.md`
 
 ## File Inventory
@@ -76,13 +86,15 @@ src/
 ├── codex-adapter.ts    ~130 lines   Codex --json → AgentSignal
 ├── generic-adapter.ts   ~95 lines   Any CLI → lifecycle signals
 ├── bus.ts              ~120 lines   Multiplexer + JSONL logger
-├── spawner.ts          ~280 lines   Spawn Claude/Codex, cleanup worktrees
+├── spawner.ts          ~310 lines   Spawn Claude/Codex, cleanup worktrees, worktree gate
 ├── registry.ts         ~100 lines   Persistent agent→session mapping
-├── orchestrator.ts     ~480 lines   Review, race, ralph, cost guard, escalation
+├── orchestrator.ts     ~500 lines   Review, race, ralph, cost guard, escalation, timeout
+├── timeout.ts           ~90 lines   withTimeout() — SIGTERM/SIGKILL escalation
+├── workflow.ts         ~360 lines   Markdown workflow parser + multi-agent runner
 ├── watch.ts            ~140 lines   JSONL replay + summary
 ├── tui.tsx             ~220 lines   Ink/React card dashboard
 ├── tmux-consumer.ts    ~190 lines   tmux pane status updates
-└── cli.ts              ~670 lines   All commands
+└── cli.ts              ~700 lines   All commands + --timeout flag
 
 tests/
 ├── phase0/             13 tests     Validate Claude Code primitives
@@ -98,14 +110,14 @@ tests/
 ## CLI Reference
 
 ```
-deno task expo spawn <prompt> [--name N] [--agent claude|codex] [--model M] [--no-worktree]
-deno task expo spawn-all <tasks.json>
+deno task expo spawn <prompt> [--name N] [--agent claude|codex] [--model M] [--no-worktree] [--timeout N]
+deno task expo spawn-all <tasks.json> [--timeout N]
 deno task expo status
 deno task expo resume <agentId> [--headless ["prompt"]]
 deno task expo fork <agentId>
 deno task expo cleanup <agentId> | --all
 deno task expo review <prompt> [--max N] [--work-agent claude|codex] [--review-agent claude|codex]
-deno task expo race "A" vs "B" [--criteria "..."]
+deno task expo race "A" vs "B" [--criteria "..."] [--timeout N]
 deno task expo ralph "<work>" "<gate>" [--max N] [--review]
 deno task watch <file.jsonl> [--json | --summary]
 deno task tui <file.jsonl> [--watch]

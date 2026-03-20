@@ -11,6 +11,7 @@
 import type { AgentSignal } from "./types.ts";
 import { SignalBus } from "./bus.ts";
 import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
+import { withTimeout } from "./timeout.ts";
 
 // --- Review Loop ---
 
@@ -29,6 +30,8 @@ export interface ReviewLoopOptions {
   model?: string;
   /** Use worktrees (default: false for review loops) */
   worktree?: boolean;
+  /** Timeout per agent in seconds (0 = no timeout, default: 600) */
+  timeout?: number;
   /** Agent type for work step (default: "claude") */
   workAgent?: AgentType;
   /** Model for work step (overrides model) */
@@ -80,6 +83,7 @@ export async function reviewLoop(
       agent: opts.workAgent,
       model: opts.workModel ?? opts.model,
       worktree: opts.worktree ?? false,
+      timeout: opts.timeout,
     });
     totalCost += workResult.cost;
 
@@ -91,6 +95,7 @@ export async function reviewLoop(
       agent: opts.reviewAgent,
       model: opts.reviewModel ?? opts.model,
       worktree: false,
+      timeout: opts.timeout,
     });
     totalCost += reviewResult.cost;
 
@@ -128,6 +133,8 @@ export interface RaceOptions {
   model?: string;
   /** Use worktrees (default: true for races) */
   worktree?: boolean;
+  /** Timeout per branch in seconds (0 = no timeout, default: 600) */
+  timeout?: number;
 }
 
 export interface RaceResult {
@@ -155,7 +162,10 @@ export async function race(
   }));
 
   const agents = await spawner.spawnAll(spawnOpts);
-  const results = await Promise.allSettled(agents.map((a) => a.done));
+  const timeoutMs = (opts.timeout ?? 600) * 1000;
+  const results = await Promise.allSettled(
+    agents.map((a) => withTimeout(a.process, a.done, { timeoutMs })),
+  );
 
   // Collect outputs
   const outputs: string[] = [];
@@ -207,6 +217,7 @@ Respond with PICK <number> (1-indexed) on the first line, followed by your reaso
     name: `${prefix}-judge`,
     model: opts.model,
     worktree: false,
+    timeout: opts.timeout,
   });
   totalCost += judgeResult.cost;
 
@@ -239,6 +250,8 @@ export interface RalphOptions {
   name?: string;
   model?: string;
   worktree?: boolean;
+  /** Timeout per agent in seconds (0 = no timeout, default: 600) */
+  timeout?: number;
 }
 
 export interface RalphResult {
@@ -267,6 +280,7 @@ export async function ralph(
         name: `${prefix}-task-${task}`,
         model: opts.model,
         worktree: opts.worktree,
+        timeout: opts.timeout,
       });
       totalCost += reviewResult.totalCostUsd;
       lastOutput = reviewResult.lastOutput;
@@ -286,6 +300,7 @@ export async function ralph(
         name: `${prefix}-task-${task}`,
         model: opts.model,
         worktree: opts.worktree ?? false,
+        timeout: opts.timeout,
       });
       totalCost += workResult.cost;
       lastOutput = workResult.output;
@@ -297,6 +312,7 @@ export async function ralph(
       name: `${prefix}-gate-${task}`,
       model: opts.model,
       worktree: false,
+      timeout: opts.timeout,
     });
     totalCost += gateResult.cost;
 
@@ -389,19 +405,22 @@ export function costGuard(
 
 // --- Helpers ---
 
-interface SpawnResult {
+export interface SpawnResult {
   output: string;
   cost: number;
   exitCode: number;
+  timedOut: boolean;
+  permissionDenials: string[];
 }
 
-async function spawnAndWait(
+export async function spawnAndWait(
   bus: SignalBus,
   spawner: AgentSpawner,
   opts: SpawnOptions & { worktree?: boolean },
 ): Promise<SpawnResult> {
   let output = "";
   let cost = 0;
+  const permissionDenials: string[] = [];
   const agentId = opts.name;
 
   // Subscribe to capture this agent's output
@@ -411,8 +430,15 @@ async function spawnAndWait(
       output += (signal.payload as Record<string, unknown>).text ?? "";
     }
     if (signal.type === "done") {
-      const result = (signal.payload as Record<string, unknown>).result;
+      const p = signal.payload as Record<string, unknown>;
+      const result = p.result;
       if (typeof result === "string") output = result;
+      const denials = p.permissionDenials as string[] | undefined;
+      if (denials) permissionDenials.push(...denials);
+    }
+    if (signal.type === "failed") {
+      const denials = (signal.payload as Record<string, unknown>).permissionDenials as string[] | undefined;
+      if (denials) permissionDenials.push(...denials);
     }
     if (signal.type === "cost") {
       cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
@@ -423,10 +449,22 @@ async function spawnAndWait(
     ...opts,
     worktree: opts.worktree ?? false,
   });
-  const result = await agent.done;
+
+  const timeoutMs = (opts.timeout ?? 600) * 1000;
+  const result = await withTimeout(agent.process, agent.done, { timeoutMs });
+
+  if (result.timedOut) {
+    await bus.emit({
+      agentId,
+      sessionId: agent.sessionId,
+      timestamp: Date.now(),
+      type: "failed",
+      payload: { error: `Agent timed out after ${opts.timeout ?? 600}s`, exitCode: -1, timedOut: true },
+    }).catch(() => {});
+  }
 
   unsub();
-  return { output, cost, exitCode: result.exitCode };
+  return { output, cost, exitCode: result.exitCode, timedOut: result.timedOut, permissionDenials };
 }
 
 function parseGateVerdict(output: string, _gatePrompt: string): "DONE" | "ITERATE" {
