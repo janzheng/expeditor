@@ -2,7 +2,7 @@
 
 Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** Feature complete. 16 source files, ~3,700 lines. 24 tests. 5 agent types (Claude, Codex, OpenCode, Pi-mono, generic).
+**Status:** Feature complete. 17 source files, ~4,000 lines. 24 tests. 5 agent types. mxit task runner.
 
 **Run tests:** `bash tests/phase0/run-all.sh` (13 pass) · `bash tests/phase1-2/run-all.sh` (11 pass)
 
@@ -24,10 +24,7 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
   - [x] Color-coded pane borders by status
   - [x] `--create-panes` flag to auto-create panes for new agents
   - [*] Requires running inside tmux session
-- [?] Web dashboard (SSE + React) #web-ui
-  - [ ] SSE endpoint streaming bus events
-  - [ ] Slate-style card grid in browser
-  - [ ] Cost/duration aggregates
+- [~] Web dashboard (SSE + React) — moved to Later #web-ui
 
 ### Phase 5: Polish & Packaging
 
@@ -42,7 +39,7 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
   - [x] [fixed: cli.ts missing break in watch case — found by cross-model review!] Bug fix from dogfooding
 - [x] [done: `spawn --agent codex|claude` flag] Multi-agent spawn support #multi-agent
 - [x] [done: `deno.json` with tasks for expo, tui, watch, tmux, test] Deno task setup
-- [ ] Package as installable CLI (`deno install --global`)
+- [~] Package as installable CLI (`deno install --global`) — moved to Later
 - [x] [done: try/catch on pipe, adapter, registry write; crash emits failed signal] Error handling hardening
   - [x] Spawner: catches pipe errors, process crashes, emits `failed` signal to bus
   - [x] Bus: catches consumer errors (one bad consumer doesn't break others), log write errors
@@ -68,8 +65,10 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
 - [x] [done: `src/opencode-adapter.ts` — maps step_start, tool_use, text, reasoning, step_finish, error] OpenCode adapter #multi-agent
 - [x] [done: `src/pimono-adapter.ts` — structured adapter, pi-mono has `--mode json` with typed events] Pi-mono adapter #multi-agent
 - [x] [done: `AgentType = "claude" | "codex" | "opencode" | "pi" | "generic"`, buildCommand + getAdapter for each] Extend AgentType #multi-agent
-- [ ] mxit integration — expo reads TASKS.md for ready work, spawns agents, updates tasks on completion #goal:fold-stack
+- [x] [done: `src/mxit-runner.ts` + CLI `expo mxit TASKS.md` — reads ready tasks, claims, spawns, marks done/fail, cascades] mxit integration #goal:fold-stack
 - [ ] Claude Code skill — `/expo review "prompt"` from inside Claude Code #goal:fold-stack
+- [ ] Package as installable CLI (`deno install --global`)
+- [ ] Web dashboard (SSE + React) — SSE endpoint, card grid, cost aggregates
 
 ## Discovered / Open Questions
 
@@ -88,7 +87,8 @@ src/
 ├── pimono-adapter.ts   ~250 lines   Pi-mono --mode json → AgentSignal
 ├── generic-adapter.ts   ~95 lines   Any CLI → lifecycle signals
 ├── bus.ts              ~120 lines   Multiplexer + JSONL logger
-├── spawner.ts          ~310 lines   Spawn Claude/Codex, cleanup worktrees, worktree gate
+├── mxit-runner.ts      ~280 lines   Standalone task runner using mxit format
+├── spawner.ts          ~340 lines   Spawn 5 agent types, cleanup worktrees, worktree gate
 ├── registry.ts         ~100 lines   Persistent agent→session mapping
 ├── orchestrator.ts     ~500 lines   Review, race, ralph, cost guard, escalation, timeout
 ├── timeout.ts           ~90 lines   withTimeout() — SIGTERM/SIGKILL escalation
