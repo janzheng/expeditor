@@ -64,11 +64,13 @@ export interface DonePayload {
   stopReason: string;
   durationMs: number;
   numTurns: number;
+  permissionDenials?: string[];
 }
 
 export interface FailedPayload {
   error: string;
   exitCode?: number;
+  permissionDenials?: string[];
 }
 
 export interface CostPayload {

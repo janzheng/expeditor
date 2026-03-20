@@ -1,5 +1,6 @@
-# Bus logs (generated at runtime)
-bus-*.jsonl
+# Runtime artifacts
+.expo/logs/
+.expo/output/
 
 # Registry (runtime state)
 .sigbus/

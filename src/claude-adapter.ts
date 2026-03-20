@@ -12,6 +12,7 @@ import type {
   AgentSignal,
   CostPayload,
   DonePayload,
+  FailedPayload,
   OutputPayload,
   ProgressPayload,
   SpawnedPayload,
@@ -267,16 +268,20 @@ function handleResult(
     _raw: event,
   };
 
+  const permissionDenials = (event.permission_denials as string[]) ?? undefined;
+
   // Build done or failed signal
   if (isError) {
+    const failedPayload: FailedPayload = {
+      error: (event.result as string) ?? "Unknown error",
+      permissionDenials,
+    };
     return [
       {
         ...base,
         timestamp,
         type: "failed",
-        payload: {
-          error: (event.result as string) ?? "Unknown error",
-        },
+        payload: failedPayload as unknown as Record<string, unknown>,
         _raw: event,
       },
       costSignal,
@@ -288,6 +293,7 @@ function handleResult(
     stopReason: (event.stop_reason as string) ?? "",
     durationMs: (event.duration_ms as number) ?? 0,
     numTurns: (event.num_turns as number) ?? 0,
+    permissionDenials,
   };
 
   return [

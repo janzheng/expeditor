@@ -1,0 +1,56 @@
+[
+  {
+    "prompt": "You are a biomedical research agent exploring the gut-brain axis in treatment-resistant depression (TRD). Read the workflow file at workflows/research-gut-brain.md for full context.\n\nYour lens: METABOLITE. Search PubMed for recent work on short-chain fatty acids (especially butyrate), tryptophan metabolism, and their effects on neuroinflammation in depression. Focus on: what specific metabolic pathways are disrupted in TRD vs treatment-responsive depression? Are there metabolites that predict antidepressant non-response?\n\nSearch PubMed using web search or the available mcp__claude_ai_PubMed tools. Find 5-10 key papers. For each, include full citation (first 3 authors et al., year, title, journal, PMID/DOI link) and note the mechanism, finding, and relevance to TRD.\n\nWrite your findings to output/metabolite-lens.md with: key papers found (with full citations), mechanisms identified, potential intervention targets, open questions, and a references section.",
+    "name": "metabolite-lens",
+    "agent": "claude",
+    "worktree": false,
+    "sandbox": {
+      "allow": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash(mkdir:*)",
+        "Bash(ls:*)",
+        "WebSearch",
+        "WebFetch",
+        "mcp__claude_ai_PubMed__search_articles",
+        "mcp__claude_ai_PubMed__get_article_metadata",
+        "mcp__claude_ai_PubMed__get_full_text_article",
+        "mcp__claude_ai_PubMed__find_related_articles"
+      ],
+      "deny": [
+        "Bash(rm:*)",
+        "Bash(git:*)"
+      ]
+    }
+  },
+  {
+    "prompt": "You are a biomedical research agent exploring the gut-brain axis in treatment-resistant depression (TRD). Read the workflow file at workflows/research-gut-brain.md for full context.\n\nYour lens: IMMUNE. Search PubMed for the intersection of gut permeability (leaky gut), systemic inflammation (IL-6, TNF-alpha, CRP), and antidepressant resistance. Focus on: does gut-driven immune activation create a neuroinflammatory state that blocks SSRI/SNRI efficacy? What immune biomarkers distinguish TRD?\n\nSearch PubMed using web search or the available mcp__claude_ai_PubMed tools. Find 5-10 key papers. For each, include full citation (first 3 authors et al., year, title, journal, PMID/DOI link) and note the mechanism, finding, and relevance to TRD.\n\nWrite your findings to output/immune-lens.md with: key papers found (with full citations), mechanisms identified, potential intervention targets, open questions, and a references section.",
+    "name": "immune-lens",
+    "agent": "claude",
+    "worktree": false,
+    "sandbox": {
+      "allow": [
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Bash(mkdir:*)",
+        "Bash(ls:*)",
+        "WebSearch",
+        "WebFetch",
+        "mcp__claude_ai_PubMed__search_articles",
+        "mcp__claude_ai_PubMed__get_article_metadata",
+        "mcp__claude_ai_PubMed__get_full_text_article",
+        "mcp__claude_ai_PubMed__find_related_articles"
+      ],
+      "deny": [
+        "Bash(rm:*)",
+        "Bash(git:*)"
+      ]
+    }
+  }
+]
