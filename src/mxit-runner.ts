@@ -1,0 +1,357 @@
+/**
+ * mxit Runner — Reads TASKS.md, spawns agents for ready tasks, tracks completion
+ *
+ * Standalone task runner using mxit's markdown format. No Claude Code required.
+ * Reads → Claims → Spawns → Listens → Marks done/fail → Cascades.
+ */
+
+import {
+  parseTasks,
+  getReady,
+  claimTask,
+  completeTask,
+  failTask,
+  resetCrashed,
+  type Task,
+} from "@mxit/parser";
+
+import { SignalBus } from "./bus.ts";
+import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
+import { Registry } from "./registry.ts";
+import { withTimeout } from "./timeout.ts";
+import { costGuard } from "./orchestrator.ts";
+
+export interface MxitRunnerOptions {
+  /** Path to TASKS.md file */
+  tasksFile: string;
+  /** Agent type to use (default: "claude") */
+  agent?: AgentType;
+  /** Model override */
+  model?: string;
+  /** Timeout per task in seconds (default: 600) */
+  timeout?: number;
+  /** Max tasks to process before stopping (default: 10) */
+  maxTasks?: number;
+  /** Run tasks in parallel when independent (default: false) */
+  parallel?: boolean;
+  /** Cost budget in USD (default: 10) */
+  budget?: number;
+  /** Use worktrees for isolation (default: true for claude) */
+  worktree?: boolean;
+  /** Sandbox preset (default: "developer") */
+  sandbox?: string;
+  /** Recover crashed tasks before starting (default: true) */
+  recover?: boolean;
+  /** Signal handler for live output */
+  onSignal?: (signal: import("./types.ts").AgentSignal) => void;
+}
+
+export interface MxitRunResult {
+  tasksCompleted: number;
+  tasksFailed: number;
+  tasksSkipped: number;
+  totalCostUsd: number;
+  /** Tasks that were processed */
+  results: TaskResult[];
+}
+
+export interface TaskResult {
+  task: Task;
+  status: "completed" | "failed" | "timed_out";
+  exitCode: number;
+  agentId: string;
+  costUsd: number;
+}
+
+/**
+ * Build a prompt for an agent from a mxit task.
+ */
+function buildTaskPrompt(task: Task, tasksFile: string): string {
+  const parts: string[] = [];
+
+  parts.push(`# Task\n${task.description}`);
+
+  // Include annotations as context
+  if (Object.keys(task.annotations).length > 0) {
+    const annots = Object.entries(task.annotations)
+      .map(([k, v]) => `- **${k}**: ${v}`)
+      .join("\n");
+    parts.push(`# Annotations\n${annots}`);
+  }
+
+  // Include child tasks as sub-requirements
+  const openChildren = task.children.filter(
+    (c) => c.status === " " || c.status === "!",
+  );
+  if (openChildren.length > 0) {
+    const subs = openChildren.map((c) => `- ${c.description}`).join("\n");
+    parts.push(`# Sub-tasks\nAlso complete these:\n${subs}`);
+  }
+
+  parts.push(
+    `# Instructions\nDo the work described above. When done, report what you changed and whether tests pass.`,
+  );
+
+  return parts.join("\n\n");
+}
+
+/**
+ * Run the mxit task loop.
+ *
+ * 1. Recover crashed tasks
+ * 2. Find ready tasks
+ * 3. Claim → Spawn → Wait → Mark done/fail
+ * 4. Repeat until no more ready tasks or maxTasks reached
+ */
+export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
+  const {
+    tasksFile,
+    agent = "claude",
+    model,
+    timeout = 600,
+    maxTasks = 10,
+    parallel = false,
+    budget = 10,
+    worktree,
+    sandbox = "developer",
+    recover = true,
+    onSignal,
+  } = opts;
+
+  // Set up infrastructure
+  const logsDir = ".expo/logs";
+  await Deno.mkdir(logsDir, { recursive: true }).catch(() => {});
+  const logFile = `${logsDir}/bus-mxit-${Date.now()}.jsonl`;
+  const bus = new SignalBus({ logFile });
+  await bus.init();
+
+  if (onSignal) {
+    bus.subscribe(onSignal);
+  }
+
+  const registry = new Registry();
+  const spawner = new AgentSpawner(bus, { registry });
+  await spawner.init();
+
+  const unguard = costGuard(bus, { totalBudget: budget });
+
+  const results: TaskResult[] = [];
+  let totalCost = 0;
+
+  try {
+    // Step 1: Recover crashed tasks
+    if (recover) {
+      const recovered = await resetCrashed(tasksFile);
+      if (recovered > 0) {
+        console.log(`[mxit] Recovered ${recovered} crashed task(s)`);
+      }
+    }
+
+    let processed = 0;
+
+    // Step 2-4: Main loop
+    while (processed < maxTasks) {
+      // Re-read and find ready tasks each iteration (file may have changed)
+      const content = await Deno.readTextFile(tasksFile);
+      const tasks = parseTasks(content);
+      const ready = getReady(tasks);
+
+      if (ready.length === 0) {
+        console.log(`[mxit] No more ready tasks`);
+        break;
+      }
+
+      if (parallel && ready.length > 1) {
+        // Fan-out: process all ready tasks in parallel
+        const batch = ready.slice(0, maxTasks - processed);
+        const batchResults = await processBatch(
+          batch, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox },
+        );
+        results.push(...batchResults);
+        totalCost += batchResults.reduce((sum, r) => sum + r.costUsd, 0);
+        processed += batch.length;
+      } else {
+        // Sequential: process one task at a time
+        const task = ready[0];
+        const result = await processTask(
+          task, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox },
+        );
+        results.push(result);
+        totalCost += result.costUsd;
+        processed++;
+      }
+    }
+  } finally {
+    unguard();
+    await bus.close();
+  }
+
+  return {
+    tasksCompleted: results.filter((r) => r.status === "completed").length,
+    tasksFailed: results.filter((r) => r.status === "failed" || r.status === "timed_out").length,
+    tasksSkipped: 0,
+    totalCostUsd: totalCost,
+    results,
+  };
+}
+
+interface ProcessOpts {
+  agent: AgentType;
+  model?: string;
+  timeout: number;
+  worktree?: boolean;
+  sandbox: string;
+}
+
+/**
+ * Process a single task: claim → spawn → wait → mark done/fail
+ */
+async function processTask(
+  task: Task,
+  tasksFile: string,
+  bus: SignalBus,
+  spawner: AgentSpawner,
+  opts: ProcessOpts,
+): Promise<TaskResult> {
+  const agentId = `mxit-${task.line}`;
+  const prompt = buildTaskPrompt(task, tasksFile);
+  const useWorktree = opts.worktree ?? (opts.agent === "claude");
+
+  // Claim
+  await claimTask(tasksFile, task.line, agentId);
+  console.log(`[mxit] Claimed: line ${task.line} → ${task.description.slice(0, 60)}`);
+
+  // Track cost for this agent
+  let cost = 0;
+  const unsub = bus.subscribe((signal) => {
+    if (signal.agentId !== agentId) return;
+    if (signal.type === "cost") {
+      cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
+    }
+  });
+
+  // Spawn
+  const spawnOpts: SpawnOptions = {
+    prompt,
+    name: agentId,
+    agent: opts.agent,
+    model: opts.model,
+    worktree: useWorktree,
+    sandbox: opts.sandbox,
+  };
+
+  try {
+    const agent = await spawner.spawn(spawnOpts);
+    const timeoutMs = opts.timeout * 1000;
+    const result = await withTimeout(agent.process, agent.done, { timeoutMs });
+
+    unsub();
+
+    if (result.timedOut) {
+      await failTask(tasksFile, task.line, `Timed out after ${opts.timeout}s`);
+      console.log(`[mxit] Timed out: line ${task.line}`);
+      return { task, status: "timed_out", exitCode: -1, agentId, costUsd: cost };
+    }
+
+    if (result.exitCode === 0) {
+      await completeTask(tasksFile, task.line, `agent ${agentId}`);
+      console.log(`[mxit] Done: line ${task.line}`);
+      return { task, status: "completed", exitCode: 0, agentId, costUsd: cost };
+    }
+
+    await failTask(tasksFile, task.line, `Exit code ${result.exitCode}`);
+    console.log(`[mxit] Failed: line ${task.line} (exit ${result.exitCode})`);
+    return { task, status: "failed", exitCode: result.exitCode, agentId, costUsd: cost };
+  } catch (err) {
+    unsub();
+    await failTask(tasksFile, task.line, String(err).slice(0, 100));
+    console.log(`[mxit] Error: line ${task.line} — ${String(err).slice(0, 100)}`);
+    return { task, status: "failed", exitCode: -1, agentId, costUsd: cost };
+  }
+}
+
+/**
+ * Process a batch of tasks in parallel.
+ */
+async function processBatch(
+  tasks: Task[],
+  tasksFile: string,
+  bus: SignalBus,
+  spawner: AgentSpawner,
+  opts: ProcessOpts,
+): Promise<TaskResult[]> {
+  // Claim all tasks first
+  for (const task of tasks) {
+    const agentId = `mxit-${task.line}`;
+    await claimTask(tasksFile, task.line, agentId);
+    console.log(`[mxit] Claimed: line ${task.line} → ${task.description.slice(0, 60)}`);
+  }
+
+  // Spawn all agents
+  const spawnedAgents = [];
+  const costTrackers = new Map<string, { cost: number; unsub: () => void }>();
+
+  for (const task of tasks) {
+    const agentId = `mxit-${task.line}`;
+    const prompt = buildTaskPrompt(task, tasksFile);
+    const useWorktree = opts.worktree ?? (opts.agent === "claude");
+
+    let cost = 0;
+    const unsub = bus.subscribe((signal) => {
+      if (signal.agentId !== agentId) return;
+      if (signal.type === "cost") {
+        cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
+      }
+    });
+    costTrackers.set(agentId, { cost, unsub });
+
+    const agent = await spawner.spawn({
+      prompt,
+      name: agentId,
+      agent: opts.agent,
+      model: opts.model,
+      worktree: useWorktree,
+      sandbox: opts.sandbox,
+    });
+    spawnedAgents.push({ task, agent, agentId });
+  }
+
+  // Wait for all with timeout
+  const timeoutMs = opts.timeout * 1000;
+  const settled = await Promise.allSettled(
+    spawnedAgents.map(({ agent }) =>
+      withTimeout(agent.process, agent.done, { timeoutMs })
+    ),
+  );
+
+  // Collect results and update TASKS.md
+  const results: TaskResult[] = [];
+
+  for (let i = 0; i < spawnedAgents.length; i++) {
+    const { task, agentId } = spawnedAgents[i];
+    const tracker = costTrackers.get(agentId)!;
+    tracker.unsub();
+    const cost = tracker.cost;
+    const s = settled[i];
+
+    if (s.status === "rejected") {
+      await failTask(tasksFile, task.line, String(s.reason).slice(0, 100));
+      results.push({ task, status: "failed", exitCode: -1, agentId, costUsd: cost });
+      continue;
+    }
+
+    const result = s.value;
+    if (result.timedOut) {
+      await failTask(tasksFile, task.line, `Timed out after ${opts.timeout}s`);
+      results.push({ task, status: "timed_out", exitCode: -1, agentId, costUsd: cost });
+    } else if (result.exitCode === 0) {
+      await completeTask(tasksFile, task.line, `agent ${agentId}`);
+      results.push({ task, status: "completed", exitCode: 0, agentId, costUsd: cost });
+    } else {
+      await failTask(tasksFile, task.line, `Exit code ${result.exitCode}`);
+      results.push({ task, status: "failed", exitCode: result.exitCode, agentId, costUsd: cost });
+    }
+  }
+
+  return results;
+}

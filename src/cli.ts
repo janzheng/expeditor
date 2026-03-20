@@ -14,6 +14,7 @@ import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
 import { Registry } from "./registry.ts";
 import { reviewLoop, race, ralph, costGuard, escalationRouter } from "./orchestrator.ts";
 import { parseWorkflow, buildAgentPrompt, runWorkflow } from "./workflow.ts";
+import { runMxit } from "./mxit-runner.ts";
 import { withTimeout } from "./timeout.ts";
 import type { AgentSignal } from "./types.ts";
 
@@ -433,9 +434,9 @@ async function cmdReview(args: string[]): Promise<void> {
   let name = "review";
   let model: string | undefined;
   let timeout: number | undefined;
-  let workAgent: "claude" | "codex" | undefined;
+  let workAgent: AgentType | undefined;
   let workModel: string | undefined;
-  let reviewAgent: "claude" | "codex" | undefined;
+  let reviewAgent: AgentType | undefined;
   let reviewModel: string | undefined;
 
   for (let i = 1; i < args.length; i++) {
@@ -709,6 +710,68 @@ async function cmdWorkflow(args: string[]): Promise<void> {
   console.log(`  Total cost: $${result.totalCostUsd.toFixed(4)}`);
 }
 
+async function cmdMxit(args: string[]): Promise<void> {
+  const tasksFile = args[0];
+  if (!tasksFile) {
+    console.error("Usage: cli.ts mxit <TASKS.md> [--agent <type>] [--model <model>] [--timeout <seconds>] [--max <N>] [--parallel] [--budget <N>]");
+    Deno.exit(1);
+  }
+
+  let agent: AgentType = "claude";
+  let model: string | undefined;
+  let timeout = 600;
+  let maxTasks = 10;
+  let parallel = false;
+  let budget = 10;
+  let sandbox = "developer";
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
+    else if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+    else if (args[i] === "--max" && args[i + 1]) maxTasks = parseInt(args[++i]);
+    else if (args[i] === "--parallel") parallel = true;
+    else if (args[i] === "--budget" && args[i + 1]) budget = parseFloat(args[++i]);
+    else if (args[i] === "--sandbox" && args[i + 1]) sandbox = args[++i];
+  }
+
+  console.log(`${BOLD}mxit Runner${RESET}`);
+  console.log(`  Tasks: ${tasksFile}`);
+  console.log(`  Agent: ${agent}${model ? `:${model}` : ""}`);
+  console.log(`  Mode:  ${parallel ? "parallel" : "sequential"}`);
+  console.log(`  Max:   ${maxTasks} tasks`);
+  console.log(`  Timeout: ${timeout}s per task`);
+  console.log(`  Budget: $${budget}`);
+  console.log("");
+
+  const result = await runMxit({
+    tasksFile,
+    agent,
+    model,
+    timeout,
+    maxTasks,
+    parallel,
+    budget,
+    sandbox,
+    onSignal: printSignal,
+  });
+
+  console.log("");
+  console.log(`${BOLD}=== mxit Results ===${RESET}`);
+  console.log(`  Completed: ${GREEN}${result.tasksCompleted}${RESET}`);
+  console.log(`  Failed:    ${result.tasksFailed > 0 ? RED : DIM}${result.tasksFailed}${RESET}`);
+  console.log(`  Cost:      $${result.totalCostUsd.toFixed(4)}`);
+
+  for (const r of result.results) {
+    const status = r.status === "completed"
+      ? `${GREEN}done${RESET}`
+      : r.status === "timed_out"
+        ? `${YELLOW}timed out${RESET}`
+        : `${RED}failed (${r.exitCode})${RESET}`;
+    console.log(`  ${DIM}L${r.task.line}${RESET} ${r.task.description.slice(0, 50)}: ${status}`);
+  }
+}
+
 // --- Main ---
 
 const [command, ...args] = Deno.args;
@@ -754,6 +817,10 @@ switch (command) {
     await cmdWorkflow(args);
     break;
 
+  case "mxit":
+    await cmdMxit(args);
+    break;
+
   case "watch": {
     // Delegate to watch.ts
     const watchCmd = new Deno.Command("deno", {
@@ -784,6 +851,7 @@ ${BOLD}Commands:${RESET}
   review <prompt>           Review loop: work → review → gate (DONE/ITERATE)
   race "A" vs "B" [flags]  Race branches in parallel, pick winner
   workflow <file.md>        Run a markdown workflow (agents + synthesis)
+  mxit <TASKS.md>           Run ready tasks from a mxit task file
 
 ${BOLD}Spawn flags:${RESET}
   --name <name>             Agent name (also worktree name)

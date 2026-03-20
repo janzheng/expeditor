@@ -1,4 +1,7 @@
 {
+  "imports": {
+    "@mxit/parser": "../mxit/src/mod.ts"
+  },
   "tasks": {
     "expo": "deno run --allow-all src/cli.ts",
     "tui": "deno run --allow-all src/tui.tsx",
