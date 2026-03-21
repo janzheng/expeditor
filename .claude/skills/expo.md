@@ -45,6 +45,8 @@ expo review "implement the feature" \
   --timeout 120
 ```
 
+Works with any combination: `claude`, `codex`, `opencode`, `pi`.
+
 ### Spawn — single headless agent
 
 ```bash
@@ -54,6 +56,8 @@ expo spawn "do the thing" \
 ```
 
 Sandbox presets: `permissive` (all tools), `research` (web + files, no git), `developer` (all tools, no destructive git).
+
+Agent types: `claude` (default), `codex`, `opencode`, `pi` (pi-mono), `generic` (any CLI).
 
 ### Workflow — markdown-driven multi-agent pipeline
 

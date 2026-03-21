@@ -695,12 +695,13 @@ async function cmdRalph(args: string[]): Promise<void> {
 async function cmdWorkflow(args: string[]): Promise<void> {
   const workflowFile = args[0];
   if (!workflowFile) {
-    console.error("Usage: cli.ts workflow <file.md> [--model <model>] [--budget <N>] [--timeout <seconds>] [--dry-run] [--sandbox <preset>]");
+    console.error("Usage: cli.ts workflow <file.md> [--model <model>] [--agent <type>] [--budget <N>] [--timeout <seconds>] [--dry-run] [--sandbox <preset>]");
     Deno.exit(1);
   }
 
   // Parse flags
   let model: string | undefined;
+  let agentOverride: AgentType | undefined;
   let budget = 10;
   let dryRun = false;
   let sandboxOverride: string | undefined;
@@ -708,6 +709,7 @@ async function cmdWorkflow(args: string[]): Promise<void> {
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--agent" && args[i + 1]) agentOverride = args[++i] as AgentType;
     else if (args[i] === "--budget" && args[i + 1]) budget = parseFloat(args[++i]);
     else if (args[i] === "--dry-run") dryRun = true;
     else if (args[i] === "--sandbox" && args[i + 1]) sandboxOverride = args[++i];
@@ -757,6 +759,7 @@ async function cmdWorkflow(args: string[]): Promise<void> {
   const result = await runWorkflow({
     workflowPath: workflowFile,
     model,
+    agent: agentOverride,
     budget,
     sandboxOverride,
     timeout,

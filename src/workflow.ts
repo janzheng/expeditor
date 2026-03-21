@@ -10,7 +10,7 @@
  */
 
 import { SignalBus } from "./bus.ts";
-import { AgentSpawner, type SpawnOptions, type SandboxConfig, SANDBOX_PRESETS } from "./spawner.ts";
+import { AgentSpawner, type SpawnOptions, type SandboxConfig, type AgentType, SANDBOX_PRESETS } from "./spawner.ts";
 import { Registry } from "./registry.ts";
 import { spawnAndWait, costGuard, type SpawnResult } from "./orchestrator.ts";
 import { withTimeout } from "./timeout.ts";
@@ -236,6 +236,8 @@ export function buildSynthesisPrompt(
 export interface WorkflowRunnerOptions {
   workflowPath: string;
   model?: string;
+  /** Agent type for all workflow agents (default: "claude") */
+  agent?: AgentType;
   budget?: number;
   sandboxOverride?: string;
   dryRun?: boolean;
@@ -287,9 +289,11 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
   const unguard = costGuard(bus, { totalBudget: budget });
 
   // Spawn all agents in parallel
+  const agentType = opts.agent;
   const spawnOpts: SpawnOptions[] = spec.agents.map((agent) => ({
     prompt: buildAgentPrompt(spec, agent),
     name: agent.name,
+    agent: agentType,
     model: opts.model,
     worktree: false,
     sandbox: spec.sandbox as string | SandboxConfig,
@@ -360,6 +364,7 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
     const synthResult = await spawnAndWait(bus, spawner, {
       prompt: synthPrompt,
       name: "synthesis",
+      agent: agentType,
       model: opts.model,
       worktree: false,
       sandbox: spec.sandbox as string | SandboxConfig,

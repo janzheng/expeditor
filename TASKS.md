@@ -76,19 +76,21 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
 
 - [ ] Pi-mono sandbox support — equivalent of `--settings` for pi-mono's permission model
   - [*] Adapter exists (`src/pimono-adapter.ts`) but sandbox/permissions not wired
+  - [*] Sandbox settings file only generated for `agentType === "claude"` in spawner
 - [ ] Pi-mono permission denial capture — parse pi-mono's denial format into `DenialDetail`
-- [ ] Pi-mono in workflow runner — `--agent pi` support in `expo workflow`
-- [ ] Pi-mono in mxit runner — `expo mxit TASKS.md --agent pi` end-to-end test
-- [ ] Pi-mono cross-model review — `--work-agent pi --review-agent claude` and vice versa
+- [x] [done: workflow --agent flag added, spawn/mxit/review already supported] Pi-mono in workflow runner
+- [x] [done: already works — `expo mxit TASKS.md --agent pi`] Pi-mono in mxit runner
+- [x] [done: already works — `--work-agent pi --review-agent claude`] Pi-mono cross-model review
 
 ### OpenCode Full Integration #multi-agent #opencode
 
 - [ ] OpenCode sandbox support — equivalent of `--settings` for opencode's permission model
   - [*] Adapter exists (`src/opencode-adapter.ts`) but sandbox/permissions not wired
+  - [*] Sandbox settings file only generated for `agentType === "claude"` in spawner
 - [ ] OpenCode permission denial capture — parse opencode's denial format into `DenialDetail`
-- [ ] OpenCode in workflow runner — `--agent opencode` support in `expo workflow`
-- [ ] OpenCode in mxit runner — `expo mxit TASKS.md --agent opencode` end-to-end test
-- [ ] OpenCode cross-model review — `--work-agent opencode --review-agent claude` and vice versa
+- [x] [done: workflow --agent flag added, spawn/mxit/review already supported] OpenCode in workflow runner
+- [x] [done: already works — `expo mxit TASKS.md --agent opencode`] OpenCode in mxit runner
+- [x] [done: already works — `--work-agent opencode --review-agent claude`] OpenCode cross-model review
 
 ### Permission Ledger
 
