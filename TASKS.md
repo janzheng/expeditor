@@ -26,19 +26,22 @@ All planned tasks complete. See [TASKS.done.md](TASKS.done.md) for Phase 0-5 arc
 
 ### Web Dashboard
 
-### Tier 1: Live Monitor #web-dashboard #needs:tier1
+### Tier 1: Live Monitor #web-dashboard
 
-- [ ] SSE endpoint — `src/sse-server.ts` that reads the signal bus and streams events as `text/event-stream`
-  - [ ] `expo serve` command — starts HTTP server on a port (default 3000)
-  - [ ] Subscribe to bus, emit each signal as an SSE event with `event:` type and JSON `data:`
-  - [ ] Support multiple concurrent browser clients
-  - [ ] Serve static HTML from same server
-- [ ] Agent card page — single HTML file, vanilla JS, no framework
-  - [ ] Cards appear when `spawned` event arrives, update on `tool_call`/`tool_result`/`progress`/`cost`
-  - [ ] Status dot: green=done, yellow=working, red=failed
-  - [ ] Each card shows: agent name, model, recent tool calls (last 5), cost, duration
-  - [ ] Cards auto-remove or grey out when `done`/`failed`
-  - [ ] "+N earlier tools" collapse when >5 tool calls (like TUI)
+- [x] [done: `src/web.ts` — SSE server + JSONL tailer, auto-detects new log files] SSE endpoint
+  - [x] `expo serve` command — starts HTTP server (default port 3000)
+  - [x] Tails JSONL bus log, broadcasts each signal as SSE event
+  - [x] Supports multiple concurrent browser clients
+  - [x] Replays existing log on connect, then streams live events
+  - [x] Auto-detects new log files when new expo commands start
+- [x] [done: `src/web/index.html` — dark theme, vanilla JS, ~250 lines] Agent card page
+  - [x] Cards appear on `spawned`, update on `tool_call`/`tool_result`/`progress`/`cost`
+  - [x] Status dot + border: green=done, yellow=working, red=failed
+  - [x] Agent name, model, recent tool calls (last 5), cost, duration, tokens
+  - [x] "+N earlier tools" expandable collapse
+  - [x] Working cards show live duration timer (updates every second)
+  - [x] Permission denials shown on card
+  - [x] Auto-reconnect on disconnect
 - [ ] Playtest Tier 1 — open in browser, run `expo spawn`, verify cards appear and update live
 
 ### Tier 2: History + Permissions UI #web-dashboard #needs:tier1

@@ -1050,6 +1050,19 @@ switch (command) {
     await cmdMxit(args);
     break;
 
+  case "serve": {
+    let port = 3000;
+    let logFile: string | undefined;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--port" && args[i + 1]) port = parseInt(args[++i]);
+      else if (args[i] === "--log" && args[i + 1]) logFile = args[++i];
+    }
+    console.log(`${BOLD}expo dashboard${RESET}`);
+    const { startServer } = await import("./web.ts");
+    await startServer({ port, logFile });
+    break;
+  }
+
   case "permissions":
     await cmdPermissions(args);
     break;
@@ -1085,6 +1098,7 @@ ${BOLD}Commands:${RESET}
   race "A" vs "B" [flags]  Race branches in parallel, pick winner
   workflow <file.md>        Run a markdown workflow (agents + synthesis)
   mxit <TASKS.md>           Run ready tasks from a mxit task file
+  serve [--port N]          Web dashboard — live agent cards in browser
   permissions               List permission ledger entries
   permissions approve <p>   Approve a permission pattern for future runs
   permissions reject <p>    Reject a permission pattern

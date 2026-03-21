@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>expo — Agent Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
+  h1 { font-size: 14px; color: #8b949e; margin-bottom: 12px; font-weight: 500; }
+  h1 span { color: #58a6ff; }
+  #status { font-size: 12px; color: #484f58; margin-bottom: 16px; }
+  #status.connected { color: #3fb950; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+  .card {
+    border: 1px solid #30363d; border-radius: 8px; padding: 12px;
+    background: #161b22; position: relative; transition: border-color 0.3s;
+  }
+  .card.working { border-color: #d29922; }
+  .card.done { border-color: #3fb950; }
+  .card.failed { border-color: #f85149; }
+  .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .agent-name { font-weight: 600; font-size: 13px; color: #f0f6fc; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .status-dot.spawned, .status-dot.working { background: #d29922; }
+  .status-dot.done { background: #3fb950; }
+  .status-dot.failed { background: #f85149; }
+  .model { font-size: 11px; color: #484f58; }
+  .tools { margin: 6px 0; max-height: 140px; overflow-y: auto; }
+  .tool {
+    font-size: 11px; padding: 2px 0; color: #8b949e; display: flex; align-items: center; gap: 4px;
+    border-left: 2px solid #30363d; padding-left: 8px; margin-left: 4px;
+  }
+  .tool .icon { width: 14px; text-align: center; }
+  .tool .icon.ok { color: #3fb950; }
+  .tool .icon.err { color: #f85149; }
+  .tool .name { color: #79c0ff; }
+  .tool .detail { color: #484f58; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .collapsed { font-size: 11px; color: #484f58; padding: 2px 0 2px 14px; cursor: pointer; }
+  .collapsed:hover { color: #8b949e; }
+  .output { font-size: 11px; color: #8b949e; margin: 6px 0; max-height: 60px; overflow: hidden; text-overflow: ellipsis; }
+  .progress { font-size: 11px; color: #6e7681; font-style: italic; }
+  .footer { display: flex; justify-content: space-between; font-size: 11px; color: #484f58; margin-top: 8px; padding-top: 8px; border-top: 1px solid #21262d; }
+  .cost { color: #d29922; }
+  .duration { color: #8b949e; }
+  .denials { margin-top: 6px; font-size: 11px; color: #f85149; }
+  .empty { text-align: center; color: #484f58; padding: 60px 0; font-size: 13px; }
+  .empty code { color: #8b949e; background: #21262d; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<h1><span>expo</span> agent dashboard</h1>
+<div id="status">connecting...</div>
+<div id="grid"></div>
+<div id="empty" class="empty">
+  Waiting for agents...<br><br>
+  Run <code>expo spawn "do something" --no-worktree</code> in another terminal
+</div>
+
+<script>
+const agents = new Map();
+const MAX_TOOLS = 5;
+
+function el(tag, attrs, ...children) {
+  const e = document.createElement(tag);
+  if (attrs) Object.entries(attrs).forEach(([k, v]) => {
+    if (k === 'class') e.className = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  });
+  children.forEach(c => {
+    if (typeof c === 'string') e.textContent = c;
+    else if (c) e.appendChild(c);
+  });
+  return e;
+}
+
+function getAgent(id) {
+  if (!agents.has(id)) {
+    agents.set(id, {
+      id,
+      status: 'spawned',
+      model: '',
+      tools: [],
+      output: '',
+      progress: '',
+      cost: 0,
+      duration: 0,
+      turns: 0,
+      tokens: 0,
+      denials: [],
+      startTime: Date.now(),
+    });
+  }
+  return agents.get(id);
+}
+
+function handleSignal(signal) {
+  const agent = getAgent(signal.agentId);
+  const p = signal.payload || {};
+
+  switch (signal.type) {
+    case 'spawned':
+      agent.status = 'working';
+      agent.model = p.model || '';
+      agent.startTime = signal.timestamp;
+      break;
+    case 'tool_call':
+      agent.status = 'working';
+      agent.tools.push({
+        tool: p.tool || '?',
+        input: p.input || {},
+        result: null,
+        isError: false,
+        isSubagent: p.isSubagent,
+        description: p.subagentDescription,
+      });
+      break;
+    case 'tool_result':
+      if (agent.tools.length > 0) {
+        const last = agent.tools[agent.tools.length - 1];
+        last.result = p.result;
+        last.isError = p.isError;
+      }
+      break;
+    case 'output':
+      agent.output = (p.text || '').slice(0, 300);
+      break;
+    case 'progress':
+      agent.progress = (p.message || '').slice(0, 200);
+      break;
+    case 'done':
+      agent.status = 'done';
+      agent.duration = p.durationMs || (Date.now() - agent.startTime);
+      agent.turns = p.numTurns || 0;
+      if (p.permissionDenials) agent.denials = p.permissionDenials;
+      break;
+    case 'failed':
+      agent.status = 'failed';
+      agent.error = p.error;
+      if (p.permissionDenials) agent.denials = p.permissionDenials;
+      break;
+    case 'cost':
+      agent.cost = p.totalCostUsd || 0;
+      agent.tokens = (p.inputTokens || 0) + (p.outputTokens || 0);
+      break;
+  }
+
+  render();
+}
+
+function toolDetail(t) {
+  const input = t.input || {};
+  switch (t.tool) {
+    case 'Read': case 'Edit': case 'Write': return input.file_path || '';
+    case 'Bash': return (input.command || '').slice(0, 50);
+    case 'Glob': case 'Grep': return input.pattern || '';
+    case 'Agent': return t.description || input.description || '';
+    default: return '';
+  }
+}
+
+function renderCard(agent) {
+  const card = el('div', { class: `card ${agent.status}` });
+
+  // Header
+  const dot = el('span', { class: `status-dot ${agent.status}` });
+  const name = el('span', { class: 'agent-name' });
+  name.appendChild(dot);
+  name.appendChild(document.createTextNode(agent.id));
+  const model = el('span', { class: 'model' }, agent.model);
+  const header = el('div', { class: 'card-header' }, name, model);
+  card.appendChild(header);
+
+  // Progress
+  if (agent.progress && agent.status === 'working') {
+    card.appendChild(el('div', { class: 'progress' }, agent.progress));
+  }
+
+  // Tools
+  const toolsDiv = el('div', { class: 'tools' });
+  const visible = agent.tools.slice(-MAX_TOOLS);
+  const hidden = agent.tools.length - visible.length;
+
+  if (hidden > 0) {
+    const collapsed = el('div', { class: 'collapsed' }, `+${hidden} earlier tools`);
+    let expanded = false;
+    collapsed.addEventListener('click', () => {
+      expanded = !expanded;
+      if (expanded) {
+        collapsed.textContent = `- hide ${hidden} tools`;
+        const allTools = agent.tools.slice(0, -MAX_TOOLS);
+        const frag = document.createDocumentFragment();
+        allTools.forEach(t => frag.appendChild(renderTool(t)));
+        collapsed.after(frag);
+      } else {
+        collapsed.textContent = `+${hidden} earlier tools`;
+        // Remove expanded tools
+        while (collapsed.nextSibling && !collapsed.nextSibling.classList?.contains('tool-visible')) {
+          collapsed.nextSibling.remove();
+        }
+      }
+    });
+    toolsDiv.appendChild(collapsed);
+  }
+
+  visible.forEach(t => {
+    const te = renderTool(t);
+    te.classList.add('tool-visible');
+    toolsDiv.appendChild(te);
+  });
+  card.appendChild(toolsDiv);
+
+  // Output
+  if (agent.output && agent.status !== 'working') {
+    const out = el('div', { class: 'output' }, agent.output.slice(0, 200));
+    card.appendChild(out);
+  }
+
+  // Error
+  if (agent.error) {
+    card.appendChild(el('div', { class: 'denials' }, agent.error));
+  }
+
+  // Denials
+  if (agent.denials.length > 0) {
+    const d = el('div', { class: 'denials' }, `denied: ${agent.denials.join(', ')}`);
+    card.appendChild(d);
+  }
+
+  // Footer
+  const dur = agent.status === 'working'
+    ? ((Date.now() - agent.startTime) / 1000).toFixed(0) + 's...'
+    : (agent.duration / 1000).toFixed(1) + 's';
+  const footer = el('div', { class: 'footer' },
+    el('span', { class: 'cost' }, agent.cost > 0 ? `$${agent.cost.toFixed(4)}` : ''),
+    el('span', { class: 'duration' }, `${dur}${agent.turns ? ` · ${agent.turns} turns` : ''}${agent.tokens ? ` · ${agent.tokens.toLocaleString()} tok` : ''}`),
+  );
+  card.appendChild(footer);
+
+  return card;
+}
+
+function renderTool(t) {
+  const iconText = t.result !== null ? (t.isError ? '\u2717' : '\u2713') : '\u2022';
+  const iconClass = t.result !== null ? (t.isError ? 'err' : 'ok') : '';
+  const icon = el('span', { class: `icon ${iconClass}` }, iconText);
+  const name = el('span', { class: 'name' }, t.isSubagent ? 'Agent' : t.tool);
+  const detail = el('span', { class: 'detail' }, toolDetail(t));
+  return el('div', { class: 'tool' }, icon, name, detail);
+}
+
+function render() {
+  const grid = document.getElementById('grid');
+  const empty = document.getElementById('empty');
+  grid.innerHTML = '';
+
+  if (agents.size === 0) {
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Sort: working first, then by start time (newest first)
+  const sorted = [...agents.values()].sort((a, b) => {
+    if (a.status === 'working' && b.status !== 'working') return -1;
+    if (b.status === 'working' && a.status !== 'working') return 1;
+    return b.startTime - a.startTime;
+  });
+
+  sorted.forEach(agent => grid.appendChild(renderCard(agent)));
+}
+
+// SSE connection
+function connect() {
+  const status = document.getElementById('status');
+  const es = new EventSource('/events');
+
+  es.addEventListener('connected', () => {
+    status.textContent = 'connected';
+    status.className = 'connected';
+  });
+
+  es.addEventListener('signal', (e) => {
+    try { handleSignal(JSON.parse(e.data)); } catch {}
+  });
+
+  es.addEventListener('replay-done', (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      status.textContent = `connected (replayed ${d.lines} events)`;
+    } catch {}
+  });
+
+  es.onerror = () => {
+    status.textContent = 'disconnected — retrying...';
+    status.className = '';
+    es.close();
+    setTimeout(connect, 2000);
+  };
+}
+
+// Update working cards' duration every second
+setInterval(() => {
+  for (const agent of agents.values()) {
+    if (agent.status === 'working') { render(); break; }
+  }
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>
