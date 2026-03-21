@@ -3,9 +3,9 @@ description: "Run expo orchestration commands — race, review, workflow, spawn,
 user_invocable: true
 ---
 
-# expo — Multi-Agent Orchestration
+# Expeditor — Multi-Agent Orchestration
 
-expo adds orchestration patterns on top of Claude Code: race (parallel + judge), review loops, task-file execution, markdown workflows, and permission management. It runs as a compiled CLI binary.
+Expeditor (`expo` CLI) adds orchestration patterns on top of Claude Code: race (parallel + judge), review loops, task-file execution, markdown workflows, and permission management. It runs as a compiled CLI binary.
 
 ## When to use expo vs Claude Code's Agent tool
 

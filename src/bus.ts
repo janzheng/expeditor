@@ -1,5 +1,5 @@
 /**
- * Signal Bus — Multiplexer
+ * Expeditor Signal Bus — Multiplexer
  *
  * Aggregates signals from multiple agent adapters into a single stream.
  * Consumers subscribe to the bus or read the JSONL output.

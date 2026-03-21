@@ -1,7 +1,7 @@
 #!/usr/bin/env -S deno run --allow-all
 
 /**
- * Signal Bus CLI — Spawn agents, watch signals, manage worktrees
+ * Expeditor CLI — Multi-agent orchestration: spawn, race, review, workflow, mxit
  *
  * Usage:
  *   deno run --allow-all src/cli.ts spawn "implement auth" --name auth-agent
@@ -214,7 +214,7 @@ async function cmdSpawn(args: string[]): Promise<void> {
   }
   const mergedSandbox = ledger.buildSandbox(baseSandbox);
 
-  console.log(`${BOLD}Signal Bus${RESET}`);
+  console.log(`${BOLD}Expeditor${RESET}`);
   console.log(`  Agent:   ${name} (${agent})`);
   console.log(`  Log:     ${logFile}`);
   console.log(`  Worktree: ${worktree ? "yes" : "no"}`);
@@ -1057,7 +1057,7 @@ switch (command) {
       if (args[i] === "--port" && args[i + 1]) port = parseInt(args[++i]);
       else if (args[i] === "--log" && args[i + 1]) logFile = args[++i];
     }
-    console.log(`${BOLD}expo dashboard${RESET}`);
+    console.log(`${BOLD}Expeditor Dashboard${RESET}`);
     const { startServer } = await import("./web.ts");
     await startServer({ port, logFile });
     break;
@@ -1083,7 +1083,7 @@ switch (command) {
   case "--help":
   case "-h":
   default:
-    console.log(`${BOLD}sigbus${RESET} — Subagent signal bus
+    console.log(`${BOLD}expo${RESET} — Expeditor: multi-agent orchestration
 
 ${BOLD}Commands:${RESET}
   spawn <prompt> [flags]    Spawn a single agent
@@ -1113,12 +1113,12 @@ ${BOLD}Spawn flags:${RESET}
   --sandbox <preset>        Sandbox preset (permissive|research|developer, default: developer)
 
 ${BOLD}Examples:${RESET}
-  sigbus spawn "implement auth" --name auth-agent
-  sigbus spawn-all tasks.json
-  sigbus status
-  sigbus resume auth-agent
-  sigbus fork auth-agent
-  sigbus cleanup --all
+  expo spawn "implement auth" --name auth-agent
+  expo spawn-all tasks.json
+  expo status
+  expo resume auth-agent
+  expo fork auth-agent
+  expo cleanup --all
 `);
     break;
 }

@@ -1,5 +1,5 @@
 /**
- * Signal Bus — Core Types
+ * Expeditor — Core Signal Types
  *
  * The normalized signal format that all adapters emit.
  * Consumers (UIs, orchestrators, loggers) only need to understand these types.

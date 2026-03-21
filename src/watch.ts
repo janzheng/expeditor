@@ -104,7 +104,7 @@ const file = Deno.args[0];
 const mode = Deno.args[1];
 
 if (!file) {
-  console.log(`${BOLD}sigbus watch${RESET} — Tail a signal bus JSONL file
+  console.log(`${BOLD}expo watch${RESET} — Tail a signal bus JSONL file
 
 Usage:
   watch <file.jsonl>              Pretty-print signals

@@ -1,0 +1,6 @@
+[1mPermission Ledger[0m
+
+  [32m●[0m Bash(git:*)                    [32mapproved[0m  [2m4x[0m [2m(from: ledger-test-2)[0m
+    [2m↳ git status (Show working tree status)[0m
+    [2m↳ git status (Show working tree status)[0m
+    [2m↳ git status (Show working tree status)[0m

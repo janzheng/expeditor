@@ -1,6 +1,6 @@
-# expo — Tasks
+# Expeditor — Tasks
 
-Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
+Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
 **Status:** Feature complete. 17 source files, ~5,200 lines. 28 tests + 4 integration tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox.
 

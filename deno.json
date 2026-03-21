@@ -1,5 +1,5 @@
 {
-  "name": "@sigbus/expo",
+  "name": "@expeditor/expo",
   "version": "0.1.0",
   "exports": "./src/cli.ts",
   "imports": {

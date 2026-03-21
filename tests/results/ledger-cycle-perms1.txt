@@ -1,0 +1,9 @@
+[1mPermission Ledger[0m
+
+  [33m●[0m Bash(git:*)                    [33mpending[0m  [2m2x[0m [2m(from: ledger-test-1)[0m
+    [2m↳ git status (Show working tree status)[0m
+    [2m↳ git status (Show working tree status)[0m
+
+[2mApprove:  expo permissions approve "<pattern>"[0m
+[2mReject:   expo permissions reject "<pattern>"[0m
+[2mReset:    expo permissions reset[0m

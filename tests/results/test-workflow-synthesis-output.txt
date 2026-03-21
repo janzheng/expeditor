@@ -1,0 +1,18 @@
+[1mWorkflow[0m: tests/test-workflow.md
+  Goal: Summarize what tools are available in this project
+  Agents: file-scanner, line-counter
+  Sandbox: permissive
+  Budget: $2
+  Output: Write findings to `.expo/output/test-synthesis.md`
+
+
+[1m=== Workflow Results ===[0m
+  file-scanner: [32msuccess[0m [2m$0.1141[0m
+  line-counter: [32msuccess[0m [2m$0.1127[0m
+
+  [32mSynthesis[0m: completed ($0.0739)
+
+  [1mCost breakdown[0m:
+    Agents:    $0.2269
+    Synthesis: $0.0739
+    [1mTotal:     $0.3008[0m
