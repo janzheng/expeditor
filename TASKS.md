@@ -66,7 +66,7 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
 - [x] [done: `src/pimono-adapter.ts` — structured adapter, pi-mono has `--mode json` with typed events] Pi-mono adapter #multi-agent
 - [x] [done: `AgentType = "claude" | "codex" | "opencode" | "pi" | "generic"`, buildCommand + getAdapter for each] Extend AgentType #multi-agent
 - [x] [done: `src/mxit-runner.ts` + CLI `expo mxit TASKS.md` — reads ready tasks, claims, spawns, marks done/fail, cascades] mxit integration #goal:fold-stack
-- [ ] Claude Code skill — `/expo review "prompt"` from inside Claude Code #goal:fold-stack
+- [x] [done: `.claude/skills/expo.md` — race, review, workflow, spawn, mxit, permissions commands] Claude Code skill #goal:fold-stack
 - [x] [done: `deno compile` → standalone binary, `deno task install` puts it in ~/.deno/bin/expo] Package as installable CLI
 - [ ] Web dashboard (SSE + React) — SSE endpoint, card grid, cost aggregates
 - [x] [done: subscribe to cost signals per agent, show per-agent + agents/synthesis/total breakdown] Cost tracking per workflow
