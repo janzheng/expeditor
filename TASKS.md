@@ -12,9 +12,56 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
 
 All planned tasks complete. See [TASKS.done.md](TASKS.done.md) for Phase 0-5 archive.
 
+## Current
+
+### Permission Sync #permissions
+
+- [x] [done: `expo permissions sync` + `--dry-run`, merges to .claude/settings.local.json] Push approved patterns to Claude Code settings
+  - [x] Reads existing settings.local.json (creates if missing)
+  - [x] Merges approved → `permissions.allow`, rejected → `permissions.deny`
+  - [x] Dedupes — skips patterns already in the settings file
+  - [x] `--dry-run` flag shows what would be added without writing
+  - [x] Idempotent — re-sync skips already-synced patterns
+- [x] [pass: approve 2 + reject 1 → dry-run shows 3 → sync writes correct JSON → re-sync skips all] Playtest sync
+
+### Web Dashboard
+
+### Tier 1: Live Monitor #web-dashboard #needs:tier1
+
+- [ ] SSE endpoint — `src/sse-server.ts` that reads the signal bus and streams events as `text/event-stream`
+  - [ ] `expo serve` command — starts HTTP server on a port (default 3000)
+  - [ ] Subscribe to bus, emit each signal as an SSE event with `event:` type and JSON `data:`
+  - [ ] Support multiple concurrent browser clients
+  - [ ] Serve static HTML from same server
+- [ ] Agent card page — single HTML file, vanilla JS, no framework
+  - [ ] Cards appear when `spawned` event arrives, update on `tool_call`/`tool_result`/`progress`/`cost`
+  - [ ] Status dot: green=done, yellow=working, red=failed
+  - [ ] Each card shows: agent name, model, recent tool calls (last 5), cost, duration
+  - [ ] Cards auto-remove or grey out when `done`/`failed`
+  - [ ] "+N earlier tools" collapse when >5 tool calls (like TUI)
+- [ ] Playtest Tier 1 — open in browser, run `expo spawn`, verify cards appear and update live
+
+### Tier 2: History + Permissions UI #web-dashboard #needs:tier1
+
+- [ ] Run history page — browse past JSONL log files from `.expo/logs/`
+  - [ ] List runs by timestamp, show agent count and total cost per run
+  - [ ] Click a run to see timeline of all signals
+- [ ] Permission ledger UI — read/write `.expo/permissions.json` from the browser
+  - [ ] Show pending/approved/rejected entries with examples
+  - [ ] Approve/reject buttons that POST to the server
+  - [ ] Server endpoint: `POST /api/permissions/approve`, `POST /api/permissions/reject`
+- [ ] Cost dashboard — aggregate costs across runs
+  - [ ] Per-agent breakdown, per-run totals, running sum chart
+
+### Tier 3: Interactive Control (Later) #web-dashboard #needs:tier2
+
+- [ ] Start agents from browser — form to compose spawn/race/review commands
+- [ ] Resume sessions — link to `claude --resume <sessionId>` or open terminal
+- [ ] Workflow visualization — fan-out → synthesis flow as a simple diagram
+
 ## Later
 
-- [ ] Web dashboard (SSE + React) — SSE endpoint, card grid, cost aggregates
+- [?] Tier 3 interactive control — needs design discussion before building
 
 ## Discovered / Open Questions
 

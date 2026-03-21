@@ -188,4 +188,67 @@ export class PermissionLedger {
       deny: deny.length > 0 ? deny : undefined,
     };
   }
+
+  /**
+   * Sync approved/rejected patterns to a Claude Code settings file.
+   * Merges into `permissions.allow` and `permissions.deny` without duplicating.
+   * Returns { added, skipped } counts.
+   */
+  async syncToSettings(settingsPath: string, opts?: { dryRun?: boolean }): Promise<{
+    allowAdded: string[];
+    denyAdded: string[];
+    skipped: string[];
+  }> {
+    // Read existing settings
+    let settings: Record<string, unknown> = {};
+    try {
+      const data = await Deno.readTextFile(settingsPath);
+      settings = JSON.parse(data);
+    } catch {
+      // File doesn't exist — start fresh
+    }
+
+    // Get or create permissions object
+    const perms = (settings.permissions ?? {}) as Record<string, unknown>;
+    const existingAllow = new Set((perms.allow as string[]) ?? []);
+    const existingDeny = new Set((perms.deny as string[]) ?? []);
+
+    const allowAdded: string[] = [];
+    const denyAdded: string[] = [];
+    const skipped: string[] = [];
+
+    for (const entry of this.entries.values()) {
+      if (entry.status === "approved") {
+        if (existingAllow.has(entry.pattern)) {
+          skipped.push(entry.pattern);
+        } else {
+          allowAdded.push(entry.pattern);
+          existingAllow.add(entry.pattern);
+        }
+      } else if (entry.status === "rejected") {
+        if (existingDeny.has(entry.pattern)) {
+          skipped.push(entry.pattern);
+        } else {
+          denyAdded.push(entry.pattern);
+          existingDeny.add(entry.pattern);
+        }
+      }
+      // pending entries are not synced — user hasn't decided yet
+    }
+
+    if (!opts?.dryRun && (allowAdded.length > 0 || denyAdded.length > 0)) {
+      perms.allow = Array.from(existingAllow);
+      perms.deny = Array.from(existingDeny);
+      // Clean up empty arrays
+      if ((perms.allow as string[]).length === 0) delete perms.allow;
+      if ((perms.deny as string[]).length === 0) delete perms.deny;
+      settings.permissions = perms;
+
+      const dir = settingsPath.substring(0, settingsPath.lastIndexOf("/"));
+      await Deno.mkdir(dir, { recursive: true });
+      await Deno.writeTextFile(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    }
+
+    return { allowAdded, denyAdded, skipped };
+  }
 }

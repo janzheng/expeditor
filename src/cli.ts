@@ -900,6 +900,39 @@ async function cmdPermissions(args: string[]): Promise<void> {
     return;
   }
 
+  if (subcommand === "sync") {
+    const dryRun = args.includes("--dry-run");
+    const settingsPath = `${Deno.cwd()}/.claude/settings.local.json`;
+    const result = await ledger.syncToSettings(settingsPath, { dryRun });
+
+    if (result.allowAdded.length === 0 && result.denyAdded.length === 0) {
+      if (result.skipped.length > 0) {
+        console.log(`${DIM}All patterns already in settings (${result.skipped.length} skipped).${RESET}`);
+      } else {
+        console.log(`${DIM}No approved/rejected patterns to sync. Approve some first.${RESET}`);
+      }
+      return;
+    }
+
+    const prefix = dryRun ? `${YELLOW}[dry-run]${RESET} Would add` : `${GREEN}Added${RESET}`;
+    if (result.allowAdded.length > 0) {
+      console.log(`${prefix} to ${BOLD}allow${RESET}:`);
+      for (const p of result.allowAdded) console.log(`  ${GREEN}+${RESET} ${p}`);
+    }
+    if (result.denyAdded.length > 0) {
+      console.log(`${prefix} to ${BOLD}deny${RESET}:`);
+      for (const p of result.denyAdded) console.log(`  ${RED}+${RESET} ${p}`);
+    }
+    if (result.skipped.length > 0) {
+      console.log(`${DIM}Skipped ${result.skipped.length} already in settings.${RESET}`);
+    }
+    if (!dryRun) {
+      console.log("");
+      console.log(`${GREEN}Synced to${RESET}: ${settingsPath}`);
+    }
+    return;
+  }
+
   if (subcommand === "reset") {
     ledger.reset();
     await ledger.save();
@@ -909,7 +942,7 @@ async function cmdPermissions(args: string[]): Promise<void> {
 
   if (subcommand && subcommand !== "list") {
     console.error(`Unknown subcommand: ${subcommand}`);
-    console.error(`Available: list, approve <pattern>, reject <pattern>, reset`);
+    console.error(`Available: list, approve <pattern>, reject <pattern>, sync [--dry-run], reset`);
     Deno.exit(1);
   }
 
@@ -1039,6 +1072,7 @@ ${BOLD}Commands:${RESET}
   permissions               List permission ledger entries
   permissions approve <p>   Approve a permission pattern for future runs
   permissions reject <p>    Reject a permission pattern
+  permissions sync          Push approved/rejected to .claude/settings.local.json
   permissions reset         Clear all permission entries
 
 ${BOLD}Spawn flags:${RESET}
