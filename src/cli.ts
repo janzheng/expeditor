@@ -876,27 +876,43 @@ async function cmdPermissions(args: string[]): Promise<void> {
   const ledger = await loadLedger();
   const subcommand = args[0];
 
+  const autoSync = args.includes("--auto-sync");
+  const syncSettings = async () => {
+    if (!autoSync) return;
+    const settingsPath = `${Deno.cwd()}/.claude/settings.local.json`;
+    const result = await ledger.syncToSettings(settingsPath);
+    if (result.allowAdded.length > 0 || result.denyAdded.length > 0) {
+      const total = result.allowAdded.length + result.denyAdded.length;
+      console.log(`${DIM}Auto-synced ${total} pattern(s) → .claude/settings.local.json${RESET}`);
+    }
+  };
+
+  // Filter --auto-sync from pattern args
+  const patternArgs = args.filter((a) => a !== "--auto-sync");
+
   if (subcommand === "approve") {
-    if (!args[1]) {
-      console.error(`Usage: permissions approve <pattern>`);
-      console.error(`Example: permissions approve "Bash(git:*)"`);
+    if (!patternArgs[1]) {
+      console.error(`Usage: permissions approve <pattern> [--auto-sync]`);
+      console.error(`Example: permissions approve "Bash(git:*)" --auto-sync`);
       Deno.exit(1);
     }
-    ledger.approve(args[1]);
+    ledger.approve(patternArgs[1]);
     await ledger.save();
-    console.log(`${GREEN}Approved${RESET}: ${args[1]}`);
+    console.log(`${GREEN}Approved${RESET}: ${patternArgs[1]}`);
+    await syncSettings();
     return;
   }
 
   if (subcommand === "reject") {
-    if (!args[1]) {
-      console.error(`Usage: permissions reject <pattern>`);
-      console.error(`Example: permissions reject "Bash(sudo:*)"`);
+    if (!patternArgs[1]) {
+      console.error(`Usage: permissions reject <pattern> [--auto-sync]`);
+      console.error(`Example: permissions reject "Bash(sudo:*)" --auto-sync`);
       Deno.exit(1);
     }
-    ledger.reject(args[1]);
+    ledger.reject(patternArgs[1]);
     await ledger.save();
-    console.log(`${RED}Rejected${RESET}: ${args[1]}`);
+    console.log(`${RED}Rejected${RESET}: ${patternArgs[1]}`);
+    await syncSettings();
     return;
   }
 
