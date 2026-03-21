@@ -876,14 +876,24 @@ async function cmdPermissions(args: string[]): Promise<void> {
   const ledger = await loadLedger();
   const subcommand = args[0];
 
-  if (subcommand === "approve" && args[1]) {
+  if (subcommand === "approve") {
+    if (!args[1]) {
+      console.error(`Usage: permissions approve <pattern>`);
+      console.error(`Example: permissions approve "Bash(git:*)"`);
+      Deno.exit(1);
+    }
     ledger.approve(args[1]);
     await ledger.save();
     console.log(`${GREEN}Approved${RESET}: ${args[1]}`);
     return;
   }
 
-  if (subcommand === "reject" && args[1]) {
+  if (subcommand === "reject") {
+    if (!args[1]) {
+      console.error(`Usage: permissions reject <pattern>`);
+      console.error(`Example: permissions reject "Bash(sudo:*)"`);
+      Deno.exit(1);
+    }
     ledger.reject(args[1]);
     await ledger.save();
     console.log(`${RED}Rejected${RESET}: ${args[1]}`);
@@ -895,6 +905,12 @@ async function cmdPermissions(args: string[]): Promise<void> {
     await ledger.save();
     console.log(`${GREEN}Ledger cleared.${RESET}`);
     return;
+  }
+
+  if (subcommand && subcommand !== "list") {
+    console.error(`Unknown subcommand: ${subcommand}`);
+    console.error(`Available: list, approve <pattern>, reject <pattern>, reset`);
+    Deno.exit(1);
   }
 
   // Default: list all entries
