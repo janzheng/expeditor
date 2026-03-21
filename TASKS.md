@@ -70,24 +70,23 @@ Headless subagent orchestration with a signal bus. See [TASKS-DESIGN.md](TASKS-D
 - [x] [done: `deno compile` → standalone binary, `deno task install` puts it in ~/.deno/bin/expo] Package as installable CLI
 - [ ] Web dashboard (SSE + React) — SSE endpoint, card grid, cost aggregates
 - [x] [done: subscribe to cost signals per agent, show per-agent + agents/synthesis/total breakdown] Cost tracking per workflow
-- [ ] Domain-level URL restrictions — `Bash(curl:*)` allows curl to anywhere; needs PreToolUse hook for URL filtering
+- [x] [done: `SandboxConfig.allowedDomains` generates PreToolUse hook that blocks unauthorized domains] Domain-level URL restrictions
+  - [x] Workflow markdown parser supports `domains:` in sandbox section
+  - [x] 5/5 unit tests pass for hook generation
 
 ### Pi-mono Full Integration #multi-agent #pi
 
-- [ ] Pi-mono sandbox support — equivalent of `--settings` for pi-mono's permission model
-  - [*] Adapter exists (`src/pimono-adapter.ts`) but sandbox/permissions not wired
-  - [*] Sandbox settings file only generated for `agentType === "claude"` in spawner
-- [ ] Pi-mono permission denial capture — parse pi-mono's denial format into `DenialDetail`
+- [x] [done: maps SandboxConfig to `--tools` flag — read,bash,edit,write,grep,find,ls] Pi-mono sandbox support
+  - [*] Limitation: pi-mono has no sub-command granularity — `Bash(git:*)` can't be mapped, only bare `Bash` deny strips bash entirely
+- [~] [wontfix: pi-mono silently blocks tools via extensions — no denial events in JSON output] Pi-mono denial capture
 - [x] [done: workflow --agent flag added, spawn/mxit/review already supported] Pi-mono in workflow runner
 - [x] [done: already works — `expo mxit TASKS.md --agent pi`] Pi-mono in mxit runner
 - [x] [done: already works — `--work-agent pi --review-agent claude`] Pi-mono cross-model review
 
 ### OpenCode Full Integration #multi-agent #opencode
 
-- [ ] OpenCode sandbox support — equivalent of `--settings` for opencode's permission model
-  - [*] Adapter exists (`src/opencode-adapter.ts`) but sandbox/permissions not wired
-  - [*] Sandbox settings file only generated for `agentType === "claude"` in spawner
-- [ ] OpenCode permission denial capture — parse opencode's denial format into `DenialDetail`
+- [x] [done: generates temp agent config with tool list + permissions] OpenCode sandbox support
+- [~] [wontfix: opencode shows denials as tool errors — can't distinguish from other errors] OpenCode denial capture
 - [x] [done: workflow --agent flag added, spawn/mxit/review already supported] OpenCode in workflow runner
 - [x] [done: already works — `expo mxit TASKS.md --agent opencode`] OpenCode in mxit runner
 - [x] [done: already works — `--work-agent opencode --review-agent claude`] OpenCode cross-model review

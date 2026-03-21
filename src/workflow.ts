@@ -166,6 +166,12 @@ function parseSandboxConfig(raw: string): SandboxConfig {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
+    } else if (trimmed.startsWith("domains:")) {
+      config.allowedDomains = trimmed
+        .slice(8)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
     }
   }
 
