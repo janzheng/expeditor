@@ -42,7 +42,7 @@ All planned tasks complete. See [TASKS.done.md](TASKS.done.md) for Phase 0-5 arc
   - [x] Working cards show live duration timer (updates every second)
   - [x] Permission denials shown on card
   - [x] Auto-reconnect on disconnect
-- [ ] Playtest Tier 1 — open in browser, run `expo spawn`, verify cards appear and update live
+- [x] [pass: 3 agents spawned, cards appeared live with tool calls, costs, denials — all working] Playtest Tier 1
 
 ### Tier 2: History + Permissions UI #web-dashboard #needs:tier1
 
