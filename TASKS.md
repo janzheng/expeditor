@@ -26,13 +26,20 @@ No open tasks. Everything shipped.
   - [x] Bar chart of last 30 runs with hover tooltips
   - [x] Per-run table with per-agent cost breakdown
 
-## Later — Web Dashboard Tier 3
+### Extras
 
-### Tier 3: Interactive Control #web-dashboard
+- [x] [done: "Resume" button on cards copies `claude --resume <sessionId>` to clipboard] Resume sessions from dashboard
+- [x] [done: `workflows/templates/` — code-review, research, refactor] Workflow templates
+- [x] [done: `src/notify.ts` — Slack/Discord/generic, driven by EXPO_WEBHOOK_URL env var] Webhook notifications
+- [x] [done: scrubber slider on runs detail, step through events] Session replay
+- [x] [done: `src/web/launch.html` + POST /api/spawn, /api/race, /api/review] Launch agents from browser
+- [x] [done: `expo init` — dirs, .gitignore, workflow templates] Project scaffolding
+- [x] [done: running total in Live page nav bar] Live cost ticker
 
-- [?] Start agents from browser — form to compose spawn/race/review commands
-- [?] Resume sessions — link to `claude --resume <sessionId>` or open terminal
-- [?] Workflow visualization — fan-out → synthesis flow as a simple diagram
+## Later
+
+- [?] Workflow visualization — fan-out → synthesis flow as a diagram
+- [?] Multi-project support — watch multiple project dirs from one dashboard
 
 ## Discovered / Open Questions
 
