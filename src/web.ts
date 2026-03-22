@@ -207,6 +207,165 @@ export async function startServer(opts: ServeOptions): Promise<void> {
       return response;
     }
 
+    // --- API: Run history ---
+    if (url.pathname === "/api/runs") {
+      return await handleListRuns(logsDir);
+    }
+    if (url.pathname.startsWith("/api/runs/")) {
+      const filename = url.pathname.slice("/api/runs/".length);
+      return await handleGetRun(logsDir, filename);
+    }
+
+    // --- API: Permissions ---
+    if (url.pathname === "/api/permissions" && req.method === "GET") {
+      return await handleGetPermissions();
+    }
+    if (url.pathname === "/api/permissions/approve" && req.method === "POST") {
+      const body = await req.json() as { pattern: string };
+      return await handleApprovePermission(body.pattern);
+    }
+    if (url.pathname === "/api/permissions/reject" && req.method === "POST") {
+      const body = await req.json() as { pattern: string };
+      return await handleRejectPermission(body.pattern);
+    }
+
+    // --- API: Cost summary ---
+    if (url.pathname === "/api/costs") {
+      return await handleCostSummary(logsDir);
+    }
+
     return await serveStatic(url.pathname);
   });
+}
+
+// --- API Handlers ---
+
+const JSON_HEADERS = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
+
+async function handleListRuns(logsDir: string): Promise<Response> {
+  try {
+    const runs = [];
+    for await (const entry of Deno.readDir(logsDir)) {
+      if (!entry.name.endsWith(".jsonl") || entry.name.endsWith(".old")) continue;
+      const path = `${logsDir}/${entry.name}`;
+      const stat = await Deno.stat(path);
+
+      // Quick scan: count agents and total cost from the file
+      let agentCount = 0;
+      let totalCost = 0;
+      const agents = new Set<string>();
+      try {
+        const content = await Deno.readTextFile(path);
+        for (const line of content.split("\n")) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            agents.add(event.agentId);
+            if (event.type === "cost") {
+              const cost = event.payload?.totalCostUsd ?? 0;
+              if (cost > totalCost) totalCost = cost; // cost signals are cumulative per agent
+            }
+          } catch { /* skip bad lines */ }
+        }
+        agentCount = agents.size;
+      } catch { /* file read error */ }
+
+      runs.push({
+        filename: entry.name,
+        timestamp: stat.mtime?.getTime() ?? 0,
+        size: stat.size,
+        agentCount,
+        totalCost,
+      });
+    }
+    runs.sort((a, b) => b.timestamp - a.timestamp);
+    return new Response(JSON.stringify(runs), { headers: JSON_HEADERS });
+  } catch {
+    return new Response("[]", { headers: JSON_HEADERS });
+  }
+}
+
+async function handleGetRun(logsDir: string, filename: string): Promise<Response> {
+  // Sanitize filename
+  if (filename.includes("..") || filename.includes("/")) {
+    return new Response("Bad request", { status: 400 });
+  }
+  try {
+    const content = await Deno.readTextFile(`${logsDir}/${filename}`);
+    const events = content.split("\n")
+      .filter((l) => l.trim())
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter(Boolean);
+    return new Response(JSON.stringify(events), { headers: JSON_HEADERS });
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
+}
+
+async function handleGetPermissions(): Promise<Response> {
+  const { PermissionLedger } = await import("./permission-ledger.ts");
+  const ledger = new PermissionLedger();
+  await ledger.load();
+  return new Response(JSON.stringify(ledger.getAll()), { headers: JSON_HEADERS });
+}
+
+async function handleApprovePermission(pattern: string): Promise<Response> {
+  if (!pattern) return new Response(JSON.stringify({ error: "pattern required" }), { status: 400, headers: JSON_HEADERS });
+  const { PermissionLedger } = await import("./permission-ledger.ts");
+  const ledger = new PermissionLedger();
+  await ledger.load();
+  ledger.approve(pattern);
+  await ledger.save();
+  return new Response(JSON.stringify({ ok: true, pattern, status: "approved" }), { headers: JSON_HEADERS });
+}
+
+async function handleRejectPermission(pattern: string): Promise<Response> {
+  if (!pattern) return new Response(JSON.stringify({ error: "pattern required" }), { status: 400, headers: JSON_HEADERS });
+  const { PermissionLedger } = await import("./permission-ledger.ts");
+  const ledger = new PermissionLedger();
+  await ledger.load();
+  ledger.reject(pattern);
+  await ledger.save();
+  return new Response(JSON.stringify({ ok: true, pattern, status: "rejected" }), { headers: JSON_HEADERS });
+}
+
+async function handleCostSummary(logsDir: string): Promise<Response> {
+  try {
+    const runs = [];
+    for await (const entry of Deno.readDir(logsDir)) {
+      if (!entry.name.endsWith(".jsonl") || entry.name.endsWith(".old")) continue;
+      const path = `${logsDir}/${entry.name}`;
+      const stat = await Deno.stat(path);
+
+      const agentCosts = new Map<string, number>();
+      try {
+        const content = await Deno.readTextFile(path);
+        for (const line of content.split("\n")) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "cost") {
+              const cost = event.payload?.totalCostUsd ?? 0;
+              agentCosts.set(event.agentId, Math.max(agentCosts.get(event.agentId) ?? 0, cost));
+            }
+          } catch { /* skip */ }
+        }
+      } catch { /* skip */ }
+
+      const totalCost = Array.from(agentCosts.values()).reduce((a, b) => a + b, 0);
+      if (totalCost > 0 || agentCosts.size > 0) {
+        runs.push({
+          filename: entry.name,
+          timestamp: stat.mtime?.getTime() ?? 0,
+          agents: Object.fromEntries(agentCosts),
+          totalCost,
+        });
+      }
+    }
+    runs.sort((a, b) => b.timestamp - a.timestamp);
+    const grandTotal = runs.reduce((sum, r) => sum + r.totalCost, 0);
+    return new Response(JSON.stringify({ runs, grandTotal }), { headers: JSON_HEADERS });
+  } catch {
+    return new Response(JSON.stringify({ runs: [], grandTotal: 0 }), { headers: JSON_HEADERS });
+  }
 }

@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Expeditor — Run History</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
+  h1 { font-size: 14px; color: #8b949e; font-weight: 500; display: inline; }
+  h1 span { color: #58a6ff; }
+  nav { margin-bottom: 16px; display: flex; align-items: center; gap: 16px; }
+  nav a { font-size: 12px; color: #8b949e; text-decoration: none; padding: 4px 8px; border-radius: 4px; }
+  nav a:hover { background: #21262d; color: #c9d1d9; }
+  nav a.active { background: #21262d; color: #58a6ff; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: #484f58; padding: 8px 12px; border-bottom: 1px solid #21262d; font-weight: 500; }
+  td { padding: 8px 12px; border-bottom: 1px solid #161b22; }
+  tr:hover td { background: #161b22; }
+  .cost { color: #d29922; }
+  .filename { color: #58a6ff; cursor: pointer; }
+  .filename:hover { text-decoration: underline; }
+  .size { color: #484f58; }
+  .empty { text-align: center; color: #484f58; padding: 60px 0; font-size: 13px; }
+  #detail { margin-top: 16px; }
+  .detail-header { font-size: 13px; color: #f0f6fc; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+  .detail-header button { font-size: 11px; background: #21262d; border: 1px solid #30363d; color: #8b949e; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+  .detail-header button:hover { background: #30363d; color: #c9d1d9; }
+  .timeline { max-height: 400px; overflow-y: auto; }
+  .event { font-size: 11px; padding: 3px 0; color: #8b949e; display: flex; gap: 8px; }
+  .event .ts { color: #484f58; min-width: 70px; }
+  .event .agent { color: #79c0ff; min-width: 100px; }
+  .event .type { min-width: 80px; }
+  .event .type.done { color: #3fb950; }
+  .event .type.failed { color: #f85149; }
+  .event .type.tool_call { color: #d2a8ff; }
+  .event .type.cost { color: #d29922; }
+  .event .info { color: #484f58; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<nav>
+  <h1><span>expeditor</span></h1>
+  <a href="/">Live</a>
+  <a href="/runs.html" class="active">Runs</a>
+  <a href="/permissions.html">Permissions</a>
+  <a href="/costs.html">Costs</a>
+</nav>
+
+<table id="runs-table">
+  <thead><tr><th>Time</th><th>Log File</th><th>Agents</th><th>Cost</th><th>Size</th></tr></thead>
+  <tbody id="runs-body"></tbody>
+</table>
+<div id="empty" class="empty">Loading runs...</div>
+<div id="detail"></div>
+
+<script>
+function fmt(ts) { return new Date(ts).toLocaleString(); }
+function fmtSize(b) { return b > 1024*1024 ? (b/1024/1024).toFixed(1)+'MB' : b > 1024 ? (b/1024).toFixed(0)+'KB' : b+'B'; }
+
+async function loadRuns() {
+  const resp = await fetch('/api/runs');
+  const runs = await resp.json();
+  const body = document.getElementById('runs-body');
+  const empty = document.getElementById('empty');
+
+  if (runs.length === 0) { empty.textContent = 'No runs found.'; return; }
+  empty.style.display = 'none';
+
+  for (const run of runs) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${fmt(run.timestamp)}</td>
+      <td class="filename" data-file="${run.filename}">${run.filename}</td>
+      <td>${run.agentCount}</td>
+      <td class="cost">${run.totalCost > 0 ? '$'+run.totalCost.toFixed(4) : '-'}</td>
+      <td class="size">${fmtSize(run.size)}</td>
+    `;
+    tr.querySelector('.filename').addEventListener('click', () => loadRun(run.filename));
+    body.appendChild(tr);
+  }
+}
+
+async function loadRun(filename) {
+  const resp = await fetch('/api/runs/' + filename);
+  const events = await resp.json();
+  const detail = document.getElementById('detail');
+
+  let html = `<div class="detail-header"><span>${filename} (${events.length} events)</span><button onclick="document.getElementById('detail').innerHTML=''">Close</button></div>`;
+  html += '<div class="timeline">';
+  for (const e of events) {
+    const ts = new Date(e.timestamp).toISOString().slice(11, 19);
+    const info = eventInfo(e);
+    html += `<div class="event"><span class="ts">${ts}</span><span class="agent">${e.agentId}</span><span class="type ${e.type}">${e.type}</span><span class="info">${info}</span></div>`;
+  }
+  html += '</div>';
+  detail.innerHTML = html;
+}
+
+function eventInfo(e) {
+  const p = e.payload || {};
+  switch (e.type) {
+    case 'spawned': return p.model || '';
+    case 'tool_call': return `${p.tool || '?'} ${p.input?.file_path || p.input?.command || p.input?.pattern || ''}`.slice(0, 80);
+    case 'tool_result': return p.isError ? 'error' : 'ok';
+    case 'output': return (p.text || '').slice(0, 80);
+    case 'done': return `${((p.durationMs||0)/1000).toFixed(1)}s, ${p.numTurns||0} turns`;
+    case 'failed': return (p.error || '').slice(0, 80);
+    case 'cost': return `$${(p.totalCostUsd||0).toFixed(4)}`;
+    default: return '';
+  }
+}
+
+loadRuns();
+</script>
+</body>
+</html>

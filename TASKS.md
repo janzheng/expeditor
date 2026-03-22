@@ -12,19 +12,21 @@ Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DES
 
 No open tasks. Everything shipped.
 
-## Later — Web Dashboard Tier 2+
+### Tier 2: History + Permissions UI + Costs #web-dashboard
 
-### Tier 2: History + Permissions UI #web-dashboard
+- [x] [done: `/api/runs` + `/api/runs/:file`, `runs.html` with timeline drill-down] Run history page
+  - [x] List runs by timestamp, agent count, total cost, file size
+  - [x] Click a run to see full signal timeline with color-coded event types
+- [x] [done: `/api/permissions` GET + `/api/permissions/approve|reject` POST, `permissions.html`] Permission ledger UI
+  - [x] Shows pending/approved/rejected entries with examples and deny counts
+  - [x] Approve/reject buttons POST to server, page reloads
+  - [x] Status counts bar (N approved, N rejected, N pending)
+- [x] [done: `/api/costs`, `costs.html` with bar chart + per-run breakdown table] Cost dashboard
+  - [x] Grand total across all runs
+  - [x] Bar chart of last 30 runs with hover tooltips
+  - [x] Per-run table with per-agent cost breakdown
 
-- [ ] Run history page — browse past JSONL log files from `.expo/logs/`
-  - [ ] List runs by timestamp, show agent count and total cost per run
-  - [ ] Click a run to see timeline of all signals
-- [ ] Permission ledger UI — read/write `.expo/permissions.json` from the browser
-  - [ ] Show pending/approved/rejected entries with examples
-  - [ ] Approve/reject buttons that POST to the server
-  - [ ] Server endpoint: `POST /api/permissions/approve`, `POST /api/permissions/reject`
-- [ ] Cost dashboard — aggregate costs across runs
-  - [ ] Per-agent breakdown, per-run totals, running sum chart
+## Later — Web Dashboard Tier 3
 
 ### Tier 3: Interactive Control #web-dashboard
 

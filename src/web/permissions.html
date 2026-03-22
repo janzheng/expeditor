@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Expeditor — Permissions</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
+  h1 { font-size: 14px; color: #8b949e; font-weight: 500; display: inline; }
+  h1 span { color: #58a6ff; }
+  nav { margin-bottom: 16px; display: flex; align-items: center; gap: 16px; }
+  nav a { font-size: 12px; color: #8b949e; text-decoration: none; padding: 4px 8px; border-radius: 4px; }
+  nav a:hover { background: #21262d; color: #c9d1d9; }
+  nav a.active { background: #21262d; color: #58a6ff; }
+  .entry { border: 1px solid #30363d; border-radius: 8px; padding: 12px; background: #161b22; margin-bottom: 8px; }
+  .entry.approved { border-color: #238636; }
+  .entry.rejected { border-color: #da3633; }
+  .entry.pending { border-color: #d29922; }
+  .entry-header { display: flex; justify-content: space-between; align-items: center; }
+  .pattern { font-size: 13px; color: #f0f6fc; font-weight: 600; }
+  .status { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+  .status.approved { background: #238636; color: #fff; }
+  .status.rejected { background: #da3633; color: #fff; }
+  .status.pending { background: #d29922; color: #000; }
+  .meta { font-size: 11px; color: #484f58; margin-top: 4px; }
+  .examples { margin-top: 6px; }
+  .example { font-size: 11px; color: #8b949e; padding: 2px 0 2px 12px; border-left: 2px solid #30363d; }
+  .actions { margin-top: 8px; display: flex; gap: 6px; }
+  .actions button { font-size: 11px; padding: 4px 12px; border-radius: 4px; cursor: pointer; border: 1px solid #30363d; }
+  .btn-approve { background: #238636; color: #fff; border-color: #238636; }
+  .btn-approve:hover { background: #2ea043; }
+  .btn-reject { background: #21262d; color: #f85149; }
+  .btn-reject:hover { background: #30363d; }
+  .empty { text-align: center; color: #484f58; padding: 60px 0; font-size: 13px; }
+  .count-bar { display: flex; gap: 12px; font-size: 12px; margin-bottom: 16px; }
+  .count-bar span { padding: 4px 10px; border-radius: 4px; background: #161b22; }
+</style>
+</head>
+<body>
+
+<nav>
+  <h1><span>expeditor</span></h1>
+  <a href="/">Live</a>
+  <a href="/runs.html">Runs</a>
+  <a href="/permissions.html" class="active">Permissions</a>
+  <a href="/costs.html">Costs</a>
+</nav>
+
+<div id="counts" class="count-bar"></div>
+<div id="entries"></div>
+<div id="empty" class="empty">Loading permissions...</div>
+
+<script>
+async function load() {
+  const resp = await fetch('/api/permissions');
+  const entries = await resp.json();
+  const container = document.getElementById('entries');
+  const empty = document.getElementById('empty');
+  const counts = document.getElementById('counts');
+
+  if (entries.length === 0) {
+    empty.textContent = 'No permission entries. Run agents to discover denied patterns.';
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Count by status
+  const c = { approved: 0, rejected: 0, pending: 0 };
+  entries.forEach(e => c[e.status]++);
+  counts.innerHTML = `
+    <span style="color:#3fb950">${c.approved} approved</span>
+    <span style="color:#f85149">${c.rejected} rejected</span>
+    <span style="color:#d29922">${c.pending} pending</span>
+  `;
+
+  // Sort: pending first, then by count desc
+  entries.sort((a, b) => {
+    if (a.status === 'pending' && b.status !== 'pending') return -1;
+    if (b.status === 'pending' && a.status !== 'pending') return 1;
+    return b.count - a.count;
+  });
+
+  for (const entry of entries) {
+    const div = document.createElement('div');
+    div.className = `entry ${entry.status}`;
+
+    let html = `<div class="entry-header">
+      <span class="pattern">${esc(entry.pattern)}</span>
+      <span class="status ${entry.status}">${entry.status}</span>
+    </div>`;
+
+    const meta = [];
+    if (entry.count > 0) meta.push(`denied ${entry.count}x`);
+    if (entry.source) meta.push(`from: ${esc(entry.source)}`);
+    if (meta.length) html += `<div class="meta">${meta.join(' · ')}</div>`;
+
+    if (entry.examples?.length) {
+      html += '<div class="examples">';
+      for (const ex of entry.examples) {
+        const parts = [];
+        if (ex.command) parts.push(esc(ex.command));
+        if (ex.description) parts.push(`(${esc(ex.description)})`);
+        if (parts.length) html += `<div class="example">${parts.join(' ')}</div>`;
+      }
+      html += '</div>';
+    }
+
+    html += `<div class="actions">`;
+    if (entry.status !== 'approved') {
+      html += `<button class="btn-approve" onclick="action('approve','${esc(entry.pattern)}')">Approve</button>`;
+    }
+    if (entry.status !== 'rejected') {
+      html += `<button class="btn-reject" onclick="action('reject','${esc(entry.pattern)}')">Reject</button>`;
+    }
+    html += `</div>`;
+
+    div.innerHTML = html;
+    container.appendChild(div);
+  }
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+async function action(type, pattern) {
+  await fetch(`/api/permissions/${type}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pattern }),
+  });
+  // Reload
+  document.getElementById('entries').innerHTML = '';
+  document.getElementById('counts').innerHTML = '';
+  document.getElementById('empty').style.display = 'block';
+  document.getElementById('empty').textContent = 'Updating...';
+  load();
+}
+
+load();
+</script>
+</body>
+</html>

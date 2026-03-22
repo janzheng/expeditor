@@ -7,8 +7,12 @@
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
-  h1 { font-size: 14px; color: #8b949e; margin-bottom: 12px; font-weight: 500; }
+  h1 { font-size: 14px; color: #8b949e; margin-bottom: 12px; font-weight: 500; display: inline; }
   h1 span { color: #58a6ff; }
+  nav { margin-bottom: 16px; display: flex; align-items: center; gap: 16px; }
+  nav a { font-size: 12px; color: #8b949e; text-decoration: none; padding: 4px 8px; border-radius: 4px; }
+  nav a:hover { background: #21262d; color: #c9d1d9; }
+  nav a.active { background: #21262d; color: #58a6ff; }
   #status { font-size: 12px; color: #484f58; margin-bottom: 16px; }
   #status.connected { color: #3fb950; }
   #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
@@ -50,7 +54,13 @@
 </head>
 <body>
 
-<h1><span>expeditor</span> agent dashboard</h1>
+<nav>
+  <h1><span>expeditor</span></h1>
+  <a href="/" class="active">Live</a>
+  <a href="/runs.html">Runs</a>
+  <a href="/permissions.html">Permissions</a>
+  <a href="/costs.html">Costs</a>
+</nav>
 <div id="status">connecting...</div>
 <div id="grid"></div>
 <div id="empty" class="empty">

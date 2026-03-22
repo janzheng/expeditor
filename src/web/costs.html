@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Expeditor — Costs</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
+  h1 { font-size: 14px; color: #8b949e; font-weight: 500; display: inline; }
+  h1 span { color: #58a6ff; }
+  nav { margin-bottom: 16px; display: flex; align-items: center; gap: 16px; }
+  nav a { font-size: 12px; color: #8b949e; text-decoration: none; padding: 4px 8px; border-radius: 4px; }
+  nav a:hover { background: #21262d; color: #c9d1d9; }
+  nav a.active { background: #21262d; color: #58a6ff; }
+  .grand-total { font-size: 24px; color: #d29922; margin-bottom: 20px; }
+  .grand-total small { font-size: 12px; color: #484f58; }
+  .chart { display: flex; gap: 2px; align-items: flex-end; height: 120px; margin-bottom: 20px; padding: 0 4px; }
+  .bar { background: #d29922; border-radius: 2px 2px 0 0; min-width: 8px; flex: 1; position: relative; cursor: pointer; transition: opacity 0.2s; }
+  .bar:hover { opacity: 0.8; }
+  .bar .tooltip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; margin-bottom: 4px; }
+  .bar:hover .tooltip { display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: #484f58; padding: 8px 12px; border-bottom: 1px solid #21262d; font-weight: 500; }
+  td { padding: 8px 12px; border-bottom: 1px solid #161b22; }
+  .cost { color: #d29922; }
+  .agent-list { font-size: 11px; color: #8b949e; }
+  .empty { text-align: center; color: #484f58; padding: 60px 0; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<nav>
+  <h1><span>expeditor</span></h1>
+  <a href="/">Live</a>
+  <a href="/runs.html">Runs</a>
+  <a href="/permissions.html">Permissions</a>
+  <a href="/costs.html" class="active">Costs</a>
+</nav>
+
+<div id="total" class="grand-total"></div>
+<div id="chart" class="chart"></div>
+<table>
+  <thead><tr><th>Run</th><th>Agents</th><th>Cost</th><th>Breakdown</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<div id="empty" class="empty">Loading costs...</div>
+
+<script>
+async function load() {
+  const resp = await fetch('/api/costs');
+  const data = await resp.json();
+  const { runs, grandTotal } = data;
+  const empty = document.getElementById('empty');
+
+  if (runs.length === 0) {
+    empty.textContent = 'No cost data yet. Run some agents first.';
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Grand total
+  document.getElementById('total').innerHTML = `$${grandTotal.toFixed(4)} <small>total across ${runs.length} runs</small>`;
+
+  // Chart — bar per run
+  const chart = document.getElementById('chart');
+  const maxCost = Math.max(...runs.map(r => r.totalCost), 0.01);
+  // Show last 30 runs
+  const recent = runs.slice(0, 30).reverse();
+  for (const run of recent) {
+    const height = Math.max((run.totalCost / maxCost) * 100, 2);
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.height = height + '%';
+    const date = new Date(run.timestamp).toLocaleDateString();
+    const agents = Object.keys(run.agents).join(', ');
+    bar.innerHTML = `<div class="tooltip">$${run.totalCost.toFixed(4)}<br>${date}<br>${agents}</div>`;
+    chart.appendChild(bar);
+  }
+
+  // Table
+  const rows = document.getElementById('rows');
+  for (const run of runs) {
+    const agentEntries = Object.entries(run.agents);
+    const breakdown = agentEntries.map(([name, cost]) => `${name}: $${Number(cost).toFixed(4)}`).join(', ');
+    const date = new Date(run.timestamp).toLocaleString();
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${run.filename}<br><small style="color:#484f58">${date}</small></td>
+      <td>${agentEntries.length}</td>
+      <td class="cost">$${run.totalCost.toFixed(4)}</td>
+      <td class="agent-list">${breakdown || '-'}</td>
+    `;
+    rows.appendChild(tr);
+  }
+}
+
+load();
+</script>
+</body>
+</html>
