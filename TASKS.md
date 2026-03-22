@@ -38,8 +38,8 @@ No open tasks. Everything shipped.
 
 ## Later
 
-- [?] Workflow visualization — fan-out → synthesis flow as a diagram
-- [?] Multi-project support — watch multiple project dirs from one dashboard
+- [~] [deferred: cosmetic — Live page already shows all cards] Workflow visualization — DAG view of fan-out → synthesis flow
+- [~] [deferred: not a real use case currently] Multi-project support
 
 ## Discovered / Open Questions
 
