@@ -1007,6 +1007,60 @@ async function cmdPermissions(args: string[]): Promise<void> {
   }
 }
 
+// --- Init scaffolding ---
+
+async function cmdInit(): Promise<void> {
+  const dirs = [".expo/logs", ".expo/output"];
+  for (const dir of dirs) {
+    await Deno.mkdir(dir, { recursive: true });
+  }
+
+  // Create .gitignore entries for expo artifacts
+  const gitignore = ".expo/\n.sigbus/\n";
+  try {
+    const existing = await Deno.readTextFile(".gitignore");
+    if (!existing.includes(".expo/")) {
+      await Deno.writeTextFile(".gitignore", existing.trimEnd() + "\n" + gitignore);
+      console.log(`${GREEN}Updated${RESET} .gitignore`);
+    } else {
+      console.log(`${DIM}.gitignore already has .expo/${RESET}`);
+    }
+  } catch {
+    await Deno.writeTextFile(".gitignore", gitignore);
+    console.log(`${GREEN}Created${RESET} .gitignore`);
+  }
+
+  // Copy workflow templates if workflows/ doesn't exist
+  const templatesUrl = new URL("../workflows/templates/", import.meta.url);
+  try {
+    await Deno.stat("workflows");
+    console.log(`${DIM}workflows/ already exists${RESET}`);
+  } catch {
+    await Deno.mkdir("workflows", { recursive: true });
+    let copied = 0;
+    try {
+      for await (const entry of Deno.readDir(templatesUrl)) {
+        if (entry.name.endsWith(".md")) {
+          const content = await Deno.readTextFile(new URL(entry.name, templatesUrl));
+          await Deno.writeTextFile(`workflows/${entry.name}`, content);
+          copied++;
+        }
+      }
+    } catch {
+      // Templates dir may not exist in compiled binary — skip
+    }
+    if (copied > 0) {
+      console.log(`${GREEN}Created${RESET} workflows/ with ${copied} templates`);
+    }
+  }
+
+  console.log("");
+  console.log(`${BOLD}Expeditor initialized.${RESET}`);
+  console.log(`  ${DIM}Run: expo spawn "do something" --no-worktree${RESET}`);
+  console.log(`  ${DIM}Run: expo serve${RESET} to open the dashboard`);
+  console.log(`  ${DIM}Run: expo workflow workflows/code-review.md --dry-run${RESET}`);
+}
+
 // --- Webhook notifications (env var driven) ---
 
 function maybeAttachWebhook(bus: import("./bus.ts").SignalBus): void {
@@ -1024,6 +1078,10 @@ function maybeAttachWebhook(bus: import("./bus.ts").SignalBus): void {
 const [command, ...args] = Deno.args;
 
 switch (command) {
+  case "init":
+    await cmdInit();
+    break;
+
   case "spawn":
     await cmdSpawn(args);
     break;
@@ -1104,6 +1162,7 @@ switch (command) {
     console.log(`${BOLD}expo${RESET} — Expeditor: multi-agent orchestration
 
 ${BOLD}Commands:${RESET}
+  init                      Set up Expeditor in current project
   spawn <prompt> [flags]    Spawn a single agent
   spawn-all <tasks.json>    Spawn multiple agents in parallel
   status                    Show all agents in registry

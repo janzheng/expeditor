@@ -234,6 +234,17 @@ export async function startServer(opts: ServeOptions): Promise<void> {
       return await handleCostSummary(logsDir);
     }
 
+    // --- API: Launch agents ---
+    if (url.pathname === "/api/spawn" && req.method === "POST") {
+      return await handleSpawn(await req.json());
+    }
+    if (url.pathname === "/api/race" && req.method === "POST") {
+      return await handleRace(await req.json());
+    }
+    if (url.pathname === "/api/review" && req.method === "POST") {
+      return await handleReview(await req.json());
+    }
+
     return await serveStatic(url.pathname);
   });
 }
@@ -368,4 +379,66 @@ async function handleCostSummary(logsDir: string): Promise<Response> {
   } catch {
     return new Response(JSON.stringify({ runs: [], grandTotal: 0 }), { headers: JSON_HEADERS });
   }
+}
+
+// --- Launch Handlers ---
+
+/** Spawn a background expo command and return immediately */
+function spawnBackground(args: string[]): void {
+  const cmd = new Deno.Command("deno", {
+    args: ["run", "--allow-all", "src/cli.ts", ...args],
+    cwd: Deno.cwd(),
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  });
+  // Fire and forget — the spawned process writes to the bus log,
+  // which the dashboard tails automatically.
+  cmd.spawn();
+}
+
+function handleSpawn(body: Record<string, unknown>): Response {
+  const prompt = String(body.prompt ?? "");
+  if (!prompt) {
+    return new Response(JSON.stringify({ error: "prompt is required" }), { status: 400, headers: JSON_HEADERS });
+  }
+
+  const args: string[] = ["spawn", prompt];
+  if (body.name) args.push("--name", String(body.name));
+  if (body.sandbox) args.push("--sandbox", String(body.sandbox));
+  if (body.agent && body.agent !== "claude") args.push("--agent", String(body.agent));
+  if (body.timeout) args.push("--timeout", String(body.timeout));
+  if (body.noWorktree) args.push("--no-worktree");
+
+  spawnBackground(args);
+  return new Response(JSON.stringify({ ok: true, message: "Spawn started — check Live page" }), { headers: JSON_HEADERS });
+}
+
+function handleRace(body: Record<string, unknown>): Response {
+  const promptA = String(body.promptA ?? "");
+  const promptB = String(body.promptB ?? "");
+  if (!promptA || !promptB) {
+    return new Response(JSON.stringify({ error: "promptA and promptB are required" }), { status: 400, headers: JSON_HEADERS });
+  }
+
+  const args: string[] = ["race", promptA, "vs", promptB];
+  if (body.criteria) args.push("--criteria", String(body.criteria));
+  if (body.timeout) args.push("--timeout", String(body.timeout));
+
+  spawnBackground(args);
+  return new Response(JSON.stringify({ ok: true, message: "Race started — check Live page" }), { headers: JSON_HEADERS });
+}
+
+function handleReview(body: Record<string, unknown>): Response {
+  const prompt = String(body.prompt ?? "");
+  if (!prompt) {
+    return new Response(JSON.stringify({ error: "prompt is required" }), { status: 400, headers: JSON_HEADERS });
+  }
+
+  const args: string[] = ["review", prompt];
+  if (body.maxIterations) args.push("--max", String(body.maxIterations));
+  if (body.timeout) args.push("--timeout", String(body.timeout));
+
+  spawnBackground(args);
+  return new Response(JSON.stringify({ ok: true, message: "Review started — check Live page" }), { headers: JSON_HEADERS });
 }

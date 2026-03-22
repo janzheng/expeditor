@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Expeditor — Launch</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
+  h1 { font-size: 14px; color: #8b949e; font-weight: 500; display: inline; }
+  h1 span { color: #58a6ff; }
+  nav { margin-bottom: 16px; display: flex; align-items: center; gap: 16px; }
+  nav a { font-size: 12px; color: #8b949e; text-decoration: none; padding: 4px 8px; border-radius: 4px; }
+  nav a:hover { background: #21262d; color: #c9d1d9; }
+  nav a.active { background: #21262d; color: #58a6ff; }
+
+  .forms { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; }
+  .form-card {
+    border: 1px solid #30363d; border-radius: 8px; padding: 16px;
+    background: #161b22;
+  }
+  .form-card h2 { font-size: 13px; color: #f0f6fc; font-weight: 600; margin-bottom: 12px; }
+  .form-card h2 .sub { font-weight: 400; color: #484f58; font-size: 11px; margin-left: 6px; }
+
+  .field { margin-bottom: 10px; }
+  .field label { display: block; font-size: 11px; color: #8b949e; margin-bottom: 4px; }
+  .field textarea, .field input, .field select {
+    width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+    color: #c9d1d9; padding: 6px 8px; font-size: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace;
+  }
+  .field textarea { resize: vertical; min-height: 70px; }
+  .field textarea:focus, .field input:focus, .field select:focus {
+    outline: none; border-color: #58a6ff;
+  }
+  .field-row { display: flex; gap: 10px; }
+  .field-row .field { flex: 1; }
+
+  .checkbox-field { margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+  .checkbox-field input { width: auto; }
+  .checkbox-field label { font-size: 11px; color: #8b949e; }
+
+  button.submit {
+    background: #238636; border: 1px solid #2ea043; color: #fff; padding: 6px 16px;
+    border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: 500;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace;
+  }
+  button.submit:hover { background: #2ea043; }
+  button.submit:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .result {
+    margin-top: 8px; font-size: 11px; padding: 4px 8px; border-radius: 4px; display: none;
+  }
+  .result.ok { display: block; background: #0d2818; color: #3fb950; border: 1px solid #238636; }
+  .result.err { display: block; background: #2d1117; color: #f85149; border: 1px solid #f85149; }
+</style>
+</head>
+<body>
+
+<nav>
+  <h1><span>expeditor</span></h1>
+  <a href="/">Live</a>
+  <a href="/runs.html">Runs</a>
+  <a href="/permissions.html">Permissions</a>
+  <a href="/costs.html">Costs</a>
+  <a href="/launch.html" class="active">Launch</a>
+</nav>
+
+<div class="forms">
+
+  <!-- Spawn Form -->
+  <div class="form-card">
+    <h2>Spawn<span class="sub">single agent</span></h2>
+    <form id="spawn-form">
+      <div class="field">
+        <label>Prompt</label>
+        <textarea name="prompt" placeholder="What should the agent do?" required></textarea>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Name</label>
+          <input name="name" placeholder="auto-generated">
+        </div>
+        <div class="field">
+          <label>Timeout (s)</label>
+          <input name="timeout" type="number" value="120" min="0">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Sandbox</label>
+          <select name="sandbox">
+            <option value="permissive">permissive</option>
+            <option value="research">research</option>
+            <option value="developer" selected>developer</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Agent type</label>
+          <select name="agent">
+            <option value="claude" selected>claude</option>
+            <option value="codex">codex</option>
+            <option value="opencode">opencode</option>
+            <option value="pi">pi</option>
+          </select>
+        </div>
+      </div>
+      <div class="checkbox-field">
+        <input type="checkbox" id="spawn-no-worktree" name="noWorktree">
+        <label for="spawn-no-worktree">No worktree (run in current directory)</label>
+      </div>
+      <button type="submit" class="submit">Spawn Agent</button>
+      <div class="result" id="spawn-result"></div>
+    </form>
+  </div>
+
+  <!-- Race Form -->
+  <div class="form-card">
+    <h2>Race<span class="sub">parallel branches, pick winner</span></h2>
+    <form id="race-form">
+      <div class="field">
+        <label>Approach A</label>
+        <textarea name="promptA" placeholder="First approach..." required></textarea>
+      </div>
+      <div class="field">
+        <label>Approach B</label>
+        <textarea name="promptB" placeholder="Second approach..." required></textarea>
+      </div>
+      <div class="field">
+        <label>Criteria</label>
+        <input name="criteria" placeholder="How to pick the winner (optional)">
+      </div>
+      <div class="field">
+        <label>Timeout (s)</label>
+        <input name="timeout" type="number" value="180" min="0">
+      </div>
+      <button type="submit" class="submit">Start Race</button>
+      <div class="result" id="race-result"></div>
+    </form>
+  </div>
+
+  <!-- Review Form -->
+  <div class="form-card">
+    <h2>Review<span class="sub">work, review, iterate</span></h2>
+    <form id="review-form">
+      <div class="field">
+        <label>Prompt</label>
+        <textarea name="prompt" placeholder="What should the agent build?" required></textarea>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Max iterations</label>
+          <input name="maxIterations" type="number" value="3" min="1">
+        </div>
+        <div class="field">
+          <label>Timeout (s)</label>
+          <input name="timeout" type="number" value="120" min="0">
+        </div>
+      </div>
+      <button type="submit" class="submit">Start Review</button>
+      <div class="result" id="review-result"></div>
+    </form>
+  </div>
+
+</div>
+
+<script>
+async function submitForm(url, data, resultEl, btn) {
+  btn.disabled = true;
+  resultEl.className = 'result';
+  resultEl.style.display = 'none';
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const json = await res.json();
+    if (json.ok) {
+      resultEl.textContent = json.message || 'Started';
+      resultEl.className = 'result ok';
+    } else {
+      resultEl.textContent = json.error || 'Unknown error';
+      resultEl.className = 'result err';
+    }
+  } catch (e) {
+    resultEl.textContent = 'Request failed: ' + e.message;
+    resultEl.className = 'result err';
+  }
+  btn.disabled = false;
+}
+
+// Spawn
+document.getElementById('spawn-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const data = {
+    prompt: f.prompt.value,
+    name: f.name.value || undefined,
+    sandbox: f.sandbox.value,
+    agent: f.agent.value,
+    timeout: parseInt(f.timeout.value) || 120,
+    noWorktree: f.noWorktree.checked,
+  };
+  submitForm('/api/spawn', data, document.getElementById('spawn-result'), f.querySelector('button'));
+});
+
+// Race
+document.getElementById('race-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const data = {
+    promptA: f.promptA.value,
+    promptB: f.promptB.value,
+    criteria: f.criteria.value || undefined,
+    timeout: parseInt(f.timeout.value) || 180,
+  };
+  submitForm('/api/race', data, document.getElementById('race-result'), f.querySelector('button'));
+});
+
+// Review
+document.getElementById('review-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const data = {
+    prompt: f.prompt.value,
+    maxIterations: parseInt(f.maxIterations.value) || 3,
+    timeout: parseInt(f.timeout.value) || 120,
+  };
+  submitForm('/api/review', data, document.getElementById('review-result'), f.querySelector('button'));
+});
+</script>
+</body>
+</html>

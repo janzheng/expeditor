@@ -64,6 +64,8 @@
   <a href="/runs.html">Runs</a>
   <a href="/permissions.html">Permissions</a>
   <a href="/costs.html">Costs</a>
+  <a href="/launch.html">Launch</a>
+  <span id="cost-ticker" style="margin-left:auto;font-size:11px;color:#d29922"></span>
 </nav>
 <div id="status">connecting...</div>
 <div id="grid"></div>
@@ -161,6 +163,12 @@ function handleSignal(signal) {
       agent.tokens = (p.inputTokens || 0) + (p.outputTokens || 0);
       break;
   }
+
+  // Update cost ticker
+  let totalCost = 0;
+  for (const a of agents.values()) totalCost += a.cost;
+  const ticker = document.getElementById('cost-ticker');
+  if (ticker && totalCost > 0) ticker.textContent = `$${totalCost.toFixed(4)}`;
 
   render();
 }
