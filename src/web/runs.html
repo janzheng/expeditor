@@ -26,6 +26,8 @@
   .detail-header { font-size: 13px; color: #f0f6fc; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
   .detail-header button { font-size: 11px; background: #21262d; border: 1px solid #30363d; color: #8b949e; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
   .detail-header button:hover { background: #30363d; color: #c9d1d9; }
+  .scrubber { width: 100%; margin: 8px 0; accent-color: #58a6ff; }
+  .scrubber-info { font-size: 11px; color: #484f58; margin-bottom: 8px; display: flex; justify-content: space-between; }
   .timeline { max-height: 400px; overflow-y: auto; }
   .event { font-size: 11px; padding: 3px 0; color: #8b949e; display: flex; gap: 8px; }
   .event .ts { color: #484f58; min-width: 70px; }
@@ -87,8 +89,13 @@ async function loadRun(filename) {
   const events = await resp.json();
   const detail = document.getElementById('detail');
 
+  // Store events for scrubber
+  window._runEvents = events;
+
   let html = `<div class="detail-header"><span>${filename} (${events.length} events)</span><button onclick="document.getElementById('detail').innerHTML=''">Close</button></div>`;
-  html += '<div class="timeline">';
+  html += `<input type="range" class="scrubber" min="0" max="${events.length - 1}" value="${events.length - 1}" oninput="scrub(this.value)">`;
+  html += `<div class="scrubber-info"><span id="scrub-pos">All ${events.length} events</span><span id="scrub-time"></span></div>`;
+  html += '<div class="timeline" id="timeline">';
   for (const e of events) {
     const ts = new Date(e.timestamp).toISOString().slice(11, 19);
     const info = eventInfo(e);
@@ -109,6 +116,26 @@ function eventInfo(e) {
     case 'failed': return (p.error || '').slice(0, 80);
     case 'cost': return `$${(p.totalCostUsd||0).toFixed(4)}`;
     default: return '';
+  }
+}
+
+function scrub(pos) {
+  const events = window._runEvents;
+  if (!events) return;
+  pos = parseInt(pos);
+  const timeline = document.getElementById('timeline');
+  const posEl = document.getElementById('scrub-pos');
+  const timeEl = document.getElementById('scrub-time');
+  if (!timeline) return;
+
+  // Show events up to position
+  const children = timeline.children;
+  for (let i = 0; i < children.length; i++) {
+    children[i].style.display = i <= pos ? '' : 'none';
+  }
+  posEl.textContent = `${pos + 1} / ${events.length} events`;
+  if (events[pos]) {
+    timeEl.textContent = new Date(events[pos].timestamp).toISOString().slice(11, 19);
   }
 }
 

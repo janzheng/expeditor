@@ -48,6 +48,10 @@
   .cost { color: #d29922; }
   .duration { color: #8b949e; }
   .denials { margin-top: 6px; font-size: 11px; color: #f85149; }
+  .resume { margin-top: 6px; }
+  .resume button { font-size: 10px; background: #21262d; border: 1px solid #30363d; color: #8b949e; padding: 3px 8px; border-radius: 4px; cursor: pointer; }
+  .resume button:hover { background: #30363d; color: #c9d1d9; }
+  .resume .copied { color: #3fb950; font-size: 10px; margin-left: 6px; }
   .empty { text-align: center; color: #484f58; padding: 60px 0; font-size: 13px; }
   .empty code { color: #8b949e; background: #21262d; padding: 2px 6px; border-radius: 4px; }
 </style>
@@ -109,6 +113,7 @@ function getAgent(id) {
 function handleSignal(signal) {
   const agent = getAgent(signal.agentId);
   const p = signal.payload || {};
+  if (signal.sessionId) agent.sessionId = signal.sessionId;
 
   switch (signal.type) {
     case 'spawned':
@@ -237,6 +242,29 @@ function renderCard(agent) {
   if (agent.denials.length > 0) {
     const d = el('div', { class: 'denials' }, `denied: ${agent.denials.join(', ')}`);
     card.appendChild(d);
+  }
+
+  // Resume button
+  if (agent.sessionId && agent.status !== 'working') {
+    const resumeDiv = document.createElement('div');
+    resumeDiv.className = 'resume';
+    const cmd = `claude --resume ${agent.sessionId}`;
+    const btn = document.createElement('button');
+    btn.textContent = 'Resume';
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(cmd);
+      const msg = document.createElement('span');
+      msg.className = 'copied';
+      msg.textContent = 'copied!';
+      resumeDiv.appendChild(msg);
+      setTimeout(() => msg.remove(), 2000);
+    });
+    resumeDiv.appendChild(btn);
+    const cmdSpan = document.createElement('span');
+    cmdSpan.style.cssText = 'font-size:10px;color:#484f58;margin-left:6px';
+    cmdSpan.textContent = agent.sessionId.slice(0, 8) + '...';
+    resumeDiv.appendChild(cmdSpan);
+    card.appendChild(resumeDiv);
   }
 
   // Footer

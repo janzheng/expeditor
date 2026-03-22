@@ -200,6 +200,7 @@ async function cmdSpawn(args: string[]): Promise<void> {
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
+  maybeAttachWebhook(bus);
 
   const registry = new Registry();
   const spawner = new AgentSpawner(bus, { registry });
@@ -290,6 +291,7 @@ async function cmdSpawnAll(args: string[]): Promise<void> {
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
+  maybeAttachWebhook(bus);
 
   const registry = new Registry();
   const spawner = new AgentSpawner(bus, { registry });
@@ -395,6 +397,7 @@ async function cmdResume(args: string[]): Promise<void> {
     const bus = new SignalBus({ logFile });
     await bus.init();
     bus.subscribe(printSignal);
+  maybeAttachWebhook(bus);
 
     console.log(`  ${DIM}Mode: headless (signals → ${logFile})${RESET}`);
     console.log("");
@@ -528,6 +531,7 @@ async function cmdReview(args: string[]): Promise<void> {
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
+  maybeAttachWebhook(bus);
 
   const registry = new Registry();
   const spawner = new AgentSpawner(bus, { registry });
@@ -597,6 +601,7 @@ async function cmdRace(args: string[]): Promise<void> {
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
+  maybeAttachWebhook(bus);
 
   const registry = new Registry();
   const spawner = new AgentSpawner(bus, { registry });
@@ -650,6 +655,7 @@ async function cmdRalph(args: string[]): Promise<void> {
   const bus = new SignalBus({ logFile });
   await bus.init();
   bus.subscribe(printSignal);
+  maybeAttachWebhook(bus);
 
   const registry = new Registry();
   const spawner = new AgentSpawner(bus, { registry });
@@ -999,6 +1005,18 @@ async function cmdPermissions(args: string[]): Promise<void> {
     console.log(`${DIM}Reject:   expo permissions reject "<pattern>"${RESET}`);
     console.log(`${DIM}Reset:    expo permissions reset${RESET}`);
   }
+}
+
+// --- Webhook notifications (env var driven) ---
+
+function maybeAttachWebhook(bus: import("./bus.ts").SignalBus): void {
+  const url = Deno.env.get("EXPO_WEBHOOK_URL");
+  if (!url) return;
+  const format = (Deno.env.get("EXPO_WEBHOOK_FORMAT") ?? "generic") as "slack" | "discord" | "generic";
+  import("./notify.ts").then(({ notifyHook }) => {
+    notifyHook(bus, { webhookUrl: url, format });
+    console.log(`${DIM}Webhook: ${url} (${format})${RESET}`);
+  });
 }
 
 // --- Main ---
