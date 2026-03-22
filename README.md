@@ -234,6 +234,77 @@ bash tests/test-workflow-synthesis.sh   # fan-out + synthesis e2e (5 checks)
 deno run --allow-all tests/test-domain-filter.ts  # domain hooks (5 checks)
 ```
 
+## Ideas & use cases
+
+### When Expeditor shines
+
+**Code review from multiple angles.** Three agents look at the same diff — one hunts bugs, one checks security, one reviews style. Synthesis combines findings and deduplicates. Catches things a single reviewer misses.
+
+**"Which approach is better?"** Race two implementations in parallel worktrees. A judge picks the winner based on your criteria. You get both branches to compare, not just one person's opinion.
+
+**Research with synthesis.** Fan out agents to investigate a topic from different angles (literature, practical examples, contrarian view). Synthesis agent reads all findings and produces a balanced summary with citations.
+
+**Iterating until it's actually good.** Review loop runs work → review → gate → iterate. Different models catch different things. Claude writes, Codex reviews (or vice versa). Stops when the reviewer says DONE.
+
+**Permission discovery.** Don't guess what 500 tool patterns your agents need. Run them, see what gets denied, approve what makes sense, sync to settings. Your permission config grows from real usage.
+
+**Headless CI/CD agents.** Spawn agents in CI pipelines. The sandbox system means agents run in default (tight) permission mode with only the tools they need. No `dangerously-skip-permissions`. Webhook notifications alert Slack when agents finish.
+
+**Task-driven development.** Write tasks in TASKS.md, run `expo mxit TASKS.md --parallel`. Agents claim tasks, work them, mark done, cascade to newly-ready tasks. You review the results.
+
+### Recipes
+
+**Quick code review of your last commit:**
+```bash
+expo workflow workflows/templates/code-review.md --timeout 120
+```
+
+**Compare two refactoring approaches:**
+```bash
+expo race \
+  "Refactor auth using middleware pattern" \
+  vs \
+  "Refactor auth using decorator pattern" \
+  --criteria "readability, testability, minimal changes"
+```
+
+**Research a topic before building:**
+```bash
+# Edit workflows/templates/research.md — replace [topic] with your topic
+expo workflow workflows/templates/research.md --budget 3
+```
+
+**Cross-model adversarial review:**
+```bash
+expo review "implement rate limiting for the API" \
+  --work-agent claude --review-agent codex --max 3
+```
+
+**Discover permissions organically:**
+```bash
+expo spawn "set up the CI pipeline" --sandbox research --no-worktree
+# → sees what's denied
+expo permissions approve "Bash(git:*)" --auto-sync
+# → next run works without that denial
+```
+
+**Monitor everything from one place:**
+```bash
+expo serve
+# Open http://localhost:3000
+# Launch agents from the Launch tab
+# Watch them work on the Live tab
+# Review costs on the Costs tab
+```
+
+### Future ideas
+
+- **`expo diff`** — side-by-side comparison of race branch outputs
+- **`expo replay`** — re-run a past session with different settings or agent type
+- **`expo doctor`** — diagnose setup issues (agents on PATH, permissions, disk)
+- **Workflow chaining** — output of one workflow feeds into the next
+- **Export** — render a run as a shareable standalone HTML report
+
 ## Design docs
 
 - `TASKS-DESIGN.md` — mission, architecture, goals, decisions
