@@ -294,7 +294,31 @@ function handleResult(
   const permissionDenials = denialDetails?.map((d) => d.pattern);
 
   // Build done or failed signal
+  const subtype = event.subtype as string | undefined;
   if (isError) {
+    // error_max_turns: agent hit turn limit but may have done real work (files written, etc.)
+    // Emit as "done" with a warning rather than "failed" so partial results aren't discarded.
+    if (subtype === "error_max_turns") {
+      const donePayload: DonePayload = {
+        result: truncate((event.result as string) ?? "", 1000),
+        stopReason: "max_turns",
+        durationMs: (event.duration_ms as number) ?? 0,
+        numTurns: (event.num_turns as number) ?? 0,
+        permissionDenials,
+        denialDetails,
+      };
+      return [
+        {
+          ...base,
+          timestamp,
+          type: "done",
+          payload: { ...donePayload, partialResult: true } as unknown as Record<string, unknown>,
+          _raw: event,
+        },
+        costSignal,
+      ];
+    }
+
     const failedPayload: FailedPayload = {
       error: (event.result as string) ?? "Unknown error",
       permissionDenials,

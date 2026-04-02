@@ -167,7 +167,7 @@ async function saveLedgerAndReport(ledger: PermissionLedger): Promise<void> {
 async function cmdSpawn(args: string[]): Promise<void> {
   const prompt = args[0];
   if (!prompt) {
-    console.error("Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree] [--timeout <seconds>] [--sandbox <preset>]");
+    console.error("Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree] [--timeout <seconds>] [--sandbox <preset>] [--auto-approve] [--max-turns <N>] [--max-tool-calls <N>] [--validate <cmd>]");
     Deno.exit(1);
   }
 
@@ -178,6 +178,10 @@ async function cmdSpawn(args: string[]): Promise<void> {
   let agent: AgentType = "claude";
   let timeout = 0; // 0 = no timeout for single spawn
   let sandbox = "developer";
+  let autoApprove = false;
+  let maxTurns: number | undefined;
+  let maxToolCalls: number | undefined;
+  let validateCommand: string | undefined;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--name" && args[i + 1]) {
       name = args[++i];
@@ -191,8 +195,20 @@ async function cmdSpawn(args: string[]): Promise<void> {
       timeout = parseInt(args[++i]);
     } else if (args[i] === "--sandbox" && args[i + 1]) {
       sandbox = args[++i];
+    } else if (args[i] === "--auto-approve") {
+      autoApprove = true;
+    } else if (args[i] === "--max-turns" && args[i + 1]) {
+      maxTurns = parseInt(args[++i]);
+    } else if (args[i] === "--max-tool-calls" && args[i + 1]) {
+      maxToolCalls = parseInt(args[++i]);
+    } else if (args[i] === "--validate" && args[i + 1]) {
+      validateCommand = args[++i];
     }
   }
+
+  // Auto-approve wires up the permission-prompt-tool MCP server
+  const AUTO_APPROVE_MCP_CONFIG = new URL("../mcp-auto-approve.json", import.meta.url).pathname;
+  const AUTO_APPROVE_TOOL = "mcp__auto_approve__approve";
 
   const ledger = await loadLedger();
 
@@ -205,6 +221,14 @@ async function cmdSpawn(args: string[]): Promise<void> {
   const registry = new Registry();
   const spawner = new AgentSpawner(bus, { registry });
   await spawner.init();
+
+  // Auto-approve: set as spawner defaults so ALL agents (including orchestrator subagents) inherit it
+  if (autoApprove) {
+    spawner.setDefaults({
+      mcpConfig: AUTO_APPROVE_MCP_CONFIG,
+      permissionPromptTool: AUTO_APPROVE_TOOL,
+    });
+  }
 
   // Merge ledger approvals into sandbox
   const baseSandbox = SANDBOX_PRESETS[sandbox];
@@ -243,6 +267,9 @@ async function cmdSpawn(args: string[]): Promise<void> {
     model,
     worktree,
     sandbox: mergedSandbox,
+    maxTurns,
+    maxToolCalls,
+    validateCommand,
   });
 
   const timeoutMs = timeout > 0 ? timeout * 1000 : undefined;
@@ -258,6 +285,26 @@ async function cmdSpawn(args: string[]): Promise<void> {
     console.log(`${DIM}Resume:  claude --resume ${spawnedAgent.sessionId}${RESET}`);
   } else {
     console.log(`${DIM}Resume:  codex resume --last${RESET}`);
+  }
+
+  // Post-job validation
+  if (validateCommand && result.exitCode === 0 && !result.timedOut) {
+    try {
+      const validate = new Deno.Command("sh", {
+        args: ["-c", validateCommand],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const vResult = await validate.output();
+      if (!vResult.success) {
+        const stderr = new TextDecoder().decode(vResult.stderr).trim();
+        console.log(`${BOLD}Validate${RESET}: ${RED}FAILED${RESET} (exit ${vResult.code}) — ${validateCommand}${stderr ? `\n  ${stderr}` : ""}`);
+      } else {
+        console.log(`${BOLD}Validate${RESET}: ${GREEN}passed${RESET}`);
+      }
+    } catch (err) {
+      console.log(`${BOLD}Validate${RESET}: ${RED}error${RESET} — ${String(err).slice(0, 200)}`);
+    }
   }
 
   // Record denials and report
@@ -1007,6 +1054,127 @@ async function cmdPermissions(args: string[]): Promise<void> {
   }
 }
 
+// --- Refine ---
+
+async function cmdRefine(args: string[]): Promise<void> {
+  const dir = args[0];
+
+  // Handle --tree and --status as quick exits (no dir required, defaults to .)
+  if (args.includes("--tree")) {
+    const { showRefineTree } = await import("./refine.ts");
+    await showRefineTree(dir || ".");
+    return;
+  }
+  if (args.includes("--status")) {
+    const { showRefineStatus } = await import("./refine.ts");
+    await showRefineStatus(dir || ".");
+    return;
+  }
+
+  if (!dir) {
+    console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--continue] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N]");
+    console.error("");
+    console.error("Quick commands:");
+    console.error("  expo refine <dir> --tree     Show archive tree");
+    console.error("  expo refine <dir> --status   Show archive summary");
+    Deno.exit(1);
+  }
+
+  // Parse flags
+  let rubric: string | undefined;
+  let rubricFile: string | undefined;
+  let maxIterations = 10;
+  let continueSession = false;
+  let branchFrom: string | undefined;
+  let interactive = false;
+  let name = "refine";
+  let model: string | undefined;
+  let agent: AgentType = "claude";
+  let timeout: number | undefined;
+  let sandbox = "developer";
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
+    else if (args[i] === "--rubric-file" && args[i + 1]) rubricFile = args[++i];
+    else if (args[i] === "--max" && args[i + 1]) maxIterations = parseInt(args[++i]);
+    else if (args[i] === "--continue") continueSession = true;
+    else if (args[i] === "--branch-from" && args[i + 1]) branchFrom = args[++i];
+    else if (args[i] === "--interactive") interactive = true;
+    else if (args[i] === "--name" && args[i + 1]) name = args[++i];
+    else if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+    else if (args[i] === "--sandbox" && args[i + 1]) sandbox = args[++i];
+  }
+
+  // Load rubric from file if specified
+  if (rubricFile && !rubric) {
+    try {
+      rubric = await Deno.readTextFile(rubricFile);
+    } catch {
+      console.error(`${RED}Cannot read rubric file: ${rubricFile}${RESET}`);
+      Deno.exit(1);
+    }
+  }
+
+  const logFile = `${LOGS_DIR}/bus-refine-${Date.now()}.jsonl`;
+  const bus = new SignalBus({ logFile });
+  await bus.init();
+  bus.subscribe(printSignal);
+  maybeAttachWebhook(bus);
+
+  const registry = new Registry();
+  const spawner = new AgentSpawner(bus, { registry });
+  await spawner.init();
+
+  const unguard = costGuard(bus, { perAgentBudget: 2.0, totalBudget: 20.0 });
+
+  console.log(`${BOLD}Refine Loop${RESET}`);
+  console.log(`  Directory:  ${dir}`);
+  console.log(`  Rubric:     ${rubric ? rubric.slice(0, 60) + (rubric.length > 60 ? "..." : "") : "(none — agent will decide)"}`);
+  console.log(`  Max iter:   ${maxIterations}`);
+  console.log(`  Agent:      ${agent}${model ? `:${model}` : ""}`);
+  if (continueSession) console.log(`  Mode:       continue previous session`);
+  if (branchFrom) console.log(`  Branch from: ${branchFrom}`);
+  if (interactive) console.log(`  Interactive: yes`);
+  console.log(`  Log:        ${logFile}`);
+  console.log("");
+
+  const { refine } = await import("./refine.ts");
+  const result = await refine(bus, spawner, {
+    dir,
+    rubric,
+    maxIterations,
+    continue: continueSession,
+    branchFrom,
+    interactive,
+    name,
+    model,
+    agent,
+    timeout,
+    sandbox,
+  });
+
+  unguard();
+  await bus.close();
+
+  console.log("");
+  console.log(`${BOLD}=== Refine Result ===${RESET}`);
+  const verdictColor = result.verdict === "CONVERGED" ? GREEN : result.verdict === "EXHAUSTED" ? RED : YELLOW;
+  console.log(`  Verdict:    ${verdictColor}${result.verdict}${RESET}`);
+  console.log(`  Iterations: ${result.iterations}`);
+  console.log(`  Kept:       ${result.keptVariants}`);
+  console.log(`  Discarded:  ${result.discardedVariants}`);
+  console.log(`  Final:      [${result.finalVariantId}]`);
+  console.log(`  Cost:       $${result.totalCostUsd.toFixed(4)}`);
+
+  if (result.verdict !== "CONVERGED") {
+    console.log("");
+    console.log(`  ${DIM}Continue: expo refine ${dir} --continue --max ${maxIterations}${RESET}`);
+    console.log(`  ${DIM}Tree:     expo refine ${dir} --tree${RESET}`);
+  }
+}
+
 // --- Init scaffolding ---
 
 async function cmdInit(): Promise<void> {
@@ -1126,6 +1294,10 @@ switch (command) {
     await cmdMxit(args);
     break;
 
+  case "refine":
+    await cmdRefine(args);
+    break;
+
   case "serve": {
     let port = 3000;
     let logFile: string | undefined;
@@ -1175,6 +1347,9 @@ ${BOLD}Commands:${RESET}
   race "A" vs "B" [flags]  Race branches in parallel, pick winner
   workflow <file.md>        Run a markdown workflow (agents + synthesis)
   mxit <TASKS.md>           Run ready tasks from a mxit task file
+  refine <dir> [flags]      Archive-based refinement loop (keep/discard/branch)
+  refine <dir> --tree       Show snapshot archive tree
+  refine <dir> --status     Show archive summary
   serve [--port N]          Web dashboard — live agent cards in browser
   permissions               List permission ledger entries
   permissions approve <p>   Approve a permission pattern for future runs
@@ -1192,9 +1367,10 @@ ${BOLD}Spawn flags:${RESET}
 ${BOLD}Examples:${RESET}
   expo spawn "implement auth" --name auth-agent
   expo spawn-all tasks.json
+  expo refine ./src --rubric "clarity, brevity" --max 5
+  expo refine ./src --continue
   expo status
   expo resume auth-agent
-  expo fork auth-agent
   expo cleanup --all
 `);
     break;

@@ -479,7 +479,41 @@ export async function spawnAndWait(
     opts.ledger.recordDenials(permissionDenials, opts.name, denialDetails);
   }
 
-  return { output, cost, exitCode: result.exitCode, timedOut: result.timedOut, permissionDenials, denialDetails };
+  // Post-job validation: run a shell command to sanity-check the result
+  let validationFailed: string | undefined;
+  if (opts.validateCommand && result.exitCode === 0 && !result.timedOut) {
+    try {
+      const validate = new Deno.Command("sh", {
+        args: ["-c", opts.validateCommand],
+        cwd: opts.cwd ?? Deno.cwd(),
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const vResult = await validate.output();
+      if (!vResult.success) {
+        const stderr = new TextDecoder().decode(vResult.stderr).trim();
+        validationFailed = `Validation failed (exit ${vResult.code}): ${opts.validateCommand}${stderr ? ` — ${stderr}` : ""}`;
+        await bus.emit({
+          agentId,
+          sessionId: agent.sessionId,
+          timestamp: Date.now(),
+          type: "failed",
+          payload: { error: validationFailed, exitCode: vResult.code, validationFailed: true },
+        }).catch(() => {});
+      }
+    } catch (err) {
+      validationFailed = `Validation error: ${String(err).slice(0, 200)}`;
+    }
+  }
+
+  return {
+    output,
+    cost,
+    exitCode: validationFailed ? 1 : result.exitCode,
+    timedOut: result.timedOut,
+    permissionDenials,
+    denialDetails,
+  };
 }
 
 function parseGateVerdict(output: string, _gatePrompt: string): "DONE" | "ITERATE" {

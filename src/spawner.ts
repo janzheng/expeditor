@@ -123,6 +123,21 @@ export interface SpawnOptions {
   timeout?: number;
   /** Extra flags */
   extraFlags?: string[];
+  /**
+   * MCP tool name to use for headless permission prompts (--permission-prompt-tool).
+   * Pass the full tool name, e.g. "mcp__auto_approve__approve".
+   * Requires mcpConfig to also be set so Claude can find the MCP server.
+   * Only works with -p (print) mode.
+   */
+  permissionPromptTool?: string;
+  /** Path to an MCP config JSON file to load additional MCP servers */
+  mcpConfig?: string;
+  /** Max conversation turns before Claude stops (default: 30 for complex tasks). Maps to --max-turns. */
+  maxTurns?: number;
+  /** Max tool calls before the harness kills the agent (thrashing protection). 0 = no limit. */
+  maxToolCalls?: number;
+  /** Shell command to run after agent completes. Non-zero exit = job marked failed. E.g. "test -f output.md" */
+  validateCommand?: string;
 }
 
 export interface SpawnedAgent {
@@ -137,11 +152,17 @@ export class AgentSpawner {
   private bus: SignalBus;
   private registry: Registry;
   private baseCwd: string;
+  private spawnDefaults: Partial<SpawnOptions> = {};
 
   constructor(bus: SignalBus, opts?: { cwd?: string; registry?: Registry }) {
     this.bus = bus;
     this.baseCwd = opts?.cwd ?? Deno.cwd();
     this.registry = opts?.registry ?? new Registry({ cwd: this.baseCwd });
+  }
+
+  /** Set default options merged into every spawn/spawnAll call */
+  setDefaults(defaults: Partial<SpawnOptions>): void {
+    this.spawnDefaults = { ...this.spawnDefaults, ...defaults };
   }
 
   /** Load persisted registry from disk */
@@ -432,6 +453,15 @@ exit 0
       args.push("--settings", opts.settingsPath);
     }
 
+    // MCP config for additional servers (e.g. auto-approve permission server)
+    if (opts.mcpConfig) args.push("--mcp-config", opts.mcpConfig);
+
+    // Headless permission handler — delegates prompts to an MCP tool instead of prompting
+    if (opts.permissionPromptTool) args.push("--permission-prompt-tool", opts.permissionPromptTool);
+
+    // Max conversation turns (default 30 — brigade found 15 too low for multi-file tasks)
+    if (opts.maxTurns) args.push("--max-turns", String(opts.maxTurns));
+
     // Legacy: direct permission mode
     if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
 
@@ -467,6 +497,9 @@ exit 0
 
   /** Spawn an agent (Claude or Codex) */
   async spawn(opts: SpawnOptions): Promise<SpawnedAgent> {
+    // Merge spawner-level defaults (e.g. mcpConfig + permissionPromptTool from --auto-approve)
+    // Explicit opts take priority over defaults
+    opts = { ...this.spawnDefaults, ...opts };
     const sessionId = opts.sessionId ?? crypto.randomUUID();
     const agentId = opts.name;
     const cwd = opts.cwd ?? this.baseCwd;
@@ -535,6 +568,32 @@ exit 0
     const adapter = this.getAdapter(agentType, adapterOpts);
     const lines = lineStream(process.stdout);
     const pipePromise = this.bus.pipeLines(lines, adapter);
+
+    // Thrashing protection: kill agent if tool calls exceed limit
+    const maxToolCalls = opts.maxToolCalls ?? 0;
+    if (maxToolCalls > 0) {
+      let toolCallCount = 0;
+      const unsub = this.bus.subscribe((signal) => {
+        if (signal.agentId !== agentId) return;
+        if (signal.type === "tool_call") {
+          toolCallCount++;
+          if (toolCallCount >= maxToolCalls) {
+            console.error(`[spawner] ${agentId} hit maxToolCalls (${maxToolCalls}) — killing`);
+            this.bus.emit({
+              agentId,
+              sessionId,
+              timestamp: Date.now(),
+              type: "failed",
+              payload: { error: `Agent killed: exceeded ${maxToolCalls} tool calls (thrashing protection)` },
+            });
+            try { process.kill("SIGTERM"); } catch { /* already dead */ }
+            unsub();
+          }
+        }
+        // Clean up subscriber when agent exits
+        if (signal.type === "done" || signal.type === "failed") unsub();
+      });
+    }
 
     // Collect stderr for diagnostics
     const stderrReader = process.stderr.getReader();
