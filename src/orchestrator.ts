@@ -14,6 +14,12 @@ import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
 import { withTimeout } from "./timeout.ts";
 import type { PermissionLedger } from "./permission-ledger.ts";
 import type { DenialDetail } from "./types.ts";
+// Lazy-loaded snapshot functions — only resolved when snapshotDir is provided.
+// This avoids hard dependency on @snapshot/core for tests that import orchestrator directly.
+async function loadSnapshot() {
+  const mod = await import("@snapshot/core");
+  return { init: mod.init, snapshot: mod.snapshot, restore: mod.restore };
+}
 
 // --- Review Loop ---
 
@@ -42,6 +48,8 @@ export interface ReviewLoopOptions {
   reviewAgent?: AgentType;
   /** Model for review step (overrides model) */
   reviewModel?: string;
+  /** Directory to snapshot before each iteration (restore on ITERATE) */
+  snapshotDir?: string;
 }
 
 const DEFAULT_REVIEW_PROMPT = `Review the work done by the previous agent. Check for bugs, missing edge cases, and code quality issues. Categorize issues as High, Medium, or Low severity. Be specific about what needs fixing.`;
@@ -71,7 +79,22 @@ export async function reviewLoop(
   let totalCost = 0;
   let iteration = 0;
 
+  // Snapshot setup — snapshot baseline before any work
+  let lastSnapshotId: string | undefined;
+  const snap = opts.snapshotDir ? await loadSnapshot() : null;
+  if (snap && opts.snapshotDir) {
+    await snap.init(opts.snapshotDir);
+    const s = await snap.snapshot(opts.snapshotDir, { change: "pre-review baseline", summary: "Snapshot before review loop" });
+    lastSnapshotId = s.id;
+  }
+
   for (iteration = 1; iteration <= max; iteration++) {
+    // Snapshot before each iteration so we can roll back on ITERATE
+    if (snap && opts.snapshotDir && iteration > 1) {
+      const s = await snap.snapshot(opts.snapshotDir, { change: `pre-iteration-${iteration}`, summary: `Snapshot before review iteration ${iteration}` });
+      lastSnapshotId = s.id;
+    }
+
     // --- Work step ---
     const workName = `${prefix}-work-${iteration}`;
     const workPrompt =
@@ -109,9 +132,16 @@ export async function reviewLoop(
     lastOutput = reviewResult.output;
 
     if (verdict === "DONE") {
+      // Snapshot the successful state
+      if (snap && opts.snapshotDir) {
+        await snap.snapshot(opts.snapshotDir, { change: `review-done-iter-${iteration}`, summary: "Review loop converged" });
+      }
       return { verdict: "DONE", iterations: iteration, lastOutput, totalCostUsd: totalCost };
     }
-    // ITERATE — continue loop
+    // ITERATE — restore to pre-iteration state so bad changes don't accumulate
+    if (snap && opts.snapshotDir && lastSnapshotId) {
+      await snap.restore(opts.snapshotDir, lastSnapshotId);
+    }
   }
 
   return {
@@ -137,6 +167,8 @@ export interface RaceOptions {
   worktree?: boolean;
   /** Timeout per branch in seconds (0 = no timeout, default: 600) */
   timeout?: number;
+  /** Directory to snapshot before race, restore winner's state after */
+  snapshotDir?: string;
 }
 
 export interface RaceResult {
@@ -154,6 +186,15 @@ export async function race(
 ): Promise<RaceResult> {
   const prefix = opts.name ?? "race";
   const n = opts.prompts.length;
+
+  // Snapshot baseline before race
+  let preRaceSnapshotId: string | undefined;
+  const snap = opts.snapshotDir ? await loadSnapshot() : null;
+  if (snap && opts.snapshotDir) {
+    await snap.init(opts.snapshotDir);
+    const s = await snap.snapshot(opts.snapshotDir, { change: "pre-race baseline", summary: `Snapshot before ${n}-way race` });
+    preRaceSnapshotId = s.id;
+  }
 
   // Spawn all branches in parallel
   const spawnOpts: SpawnOptions[] = opts.prompts.map((prompt, i) => ({
@@ -185,6 +226,10 @@ export async function race(
     .filter((i) => i >= 0);
 
   if (successIndices.length === 0) {
+    // All failed — restore pre-race state
+    if (snap && opts.snapshotDir && preRaceSnapshotId) {
+      await snap.restore(opts.snapshotDir, preRaceSnapshotId);
+    }
     return {
       winner: -1,
       winnerOutput: "",
@@ -225,6 +270,11 @@ Respond with PICK <number> (1-indexed) on the first line, followed by your reaso
 
   const winnerNum = parsePickVerdict(judgeResult.output, n);
   const winner = winnerNum >= 0 ? winnerNum : successIndices[0];
+
+  // Snapshot winner's state
+  if (snap && opts.snapshotDir) {
+    await snap.snapshot(opts.snapshotDir, { change: `race-winner-branch-${winner + 1}`, summary: judgeResult.output.slice(0, 200) });
+  }
 
   return {
     winner,

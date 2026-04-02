@@ -91,9 +91,9 @@ Design specs: `github-repos/research/hyperagents/_workshop/expo-local-worktrees.
 
 ### Wire snapshot into existing patterns
 
-- [ ] `expo race` — snapshot before parallel agents, restore winner's state #snapshot
-- [ ] `expo review` — snapshot before each review cycle, rollback on gate fail #snapshot
-- [ ] `expo mxit` — snapshot before each task, restore on failure #snapshot
+- [x] [done: RaceOptions.snapshotDir — baseline before spawn, restore on all-fail, snapshot winner] `expo race` — snapshot before parallel agents, restore winner's state #snapshot
+- [x] [done: ReviewLoopOptions.snapshotDir — baseline + pre-iteration snapshots, restore on ITERATE] `expo review` — snapshot before each review cycle, rollback on gate fail #snapshot
+- [x] [done: MxitRunnerOptions.snapshotDir — pre-task snapshot, restore on fail/timeout, snapshot on success] `expo mxit` — snapshot before each task, restore on failure #snapshot
 
 ## Brigade Learnings — Ported Fixes & Patterns
 
@@ -201,11 +201,11 @@ expo status
 expo resume <agentId> [--headless ["prompt"]]
 expo fork <agentId>
 expo cleanup <agentId> | --all
-expo review <prompt> [--max N] [--work-agent TYPE] [--review-agent TYPE]
-expo race "A" vs "B" [--criteria "..."] [--timeout N]
+expo review <prompt> [--max N] [--work-agent TYPE] [--review-agent TYPE] [--snapshot-dir <dir>]
+expo race "A" vs "B" [--criteria "..."] [--timeout N] [--snapshot-dir <dir>]
 expo ralph "<work>" "<gate>" [--max N] [--review]
 expo workflow <file.md> [--agent TYPE] [--model M] [--budget N] [--timeout N] [--sandbox S]
-expo mxit <TASKS.md> [--agent TYPE] [--parallel] [--max N] [--timeout N] [--sandbox S]
+expo mxit <TASKS.md> [--agent TYPE] [--parallel] [--max N] [--timeout N] [--sandbox S] [--snapshot-dir <dir>]
 expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--agent TYPE] [--timeout N]
 expo refine <dir> --tree | --status
 expo serve [--port N] [--log <file.jsonl>]

@@ -562,6 +562,7 @@ async function cmdReview(args: string[]): Promise<void> {
   let workModel: string | undefined;
   let reviewAgent: AgentType | undefined;
   let reviewModel: string | undefined;
+  let snapshotDir: string | undefined;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--max" && args[i + 1]) maxIterations = parseInt(args[++i]);
@@ -572,6 +573,7 @@ async function cmdReview(args: string[]): Promise<void> {
     else if (args[i] === "--work-model" && args[i + 1]) workModel = args[++i];
     else if (args[i] === "--review-agent" && args[i + 1]) reviewAgent = args[++i] as AgentType;
     else if (args[i] === "--review-model" && args[i + 1]) reviewModel = args[++i];
+    else if (args[i] === "--snapshot-dir" && args[i + 1]) snapshotDir = args[++i];
   }
 
   const logFile = `${LOGS_DIR}/bus-review-${Date.now()}.jsonl`;
@@ -607,6 +609,7 @@ async function cmdReview(args: string[]): Promise<void> {
     workModel: workModel,
     reviewAgent: reviewAgent,
     reviewModel: reviewModel,
+    snapshotDir,
   });
 
   unguard();
@@ -627,6 +630,7 @@ async function cmdRace(args: string[]): Promise<void> {
   let name = "race";
   let model: string | undefined;
   let timeout: number | undefined;
+  let snapshotDir: string | undefined;
 
   let i = 0;
   while (i < args.length) {
@@ -635,6 +639,7 @@ async function cmdRace(args: string[]): Promise<void> {
     if (args[i] === "--name" && args[i + 1]) { name = args[++i]; i++; continue; }
     if (args[i] === "--model" && args[i + 1]) { model = args[++i]; i++; continue; }
     if (args[i] === "--timeout" && args[i + 1]) { timeout = parseInt(args[++i]); i++; continue; }
+    if (args[i] === "--snapshot-dir" && args[i + 1]) { snapshotDir = args[++i]; i++; continue; }
     prompts.push(args[i]);
     i++;
   }
@@ -662,7 +667,7 @@ async function cmdRace(args: string[]): Promise<void> {
   console.log(`  Log: ${logFile}`);
   console.log("");
 
-  const result = await race(bus, spawner, { prompts, criteria, name, model, timeout });
+  const result = await race(bus, spawner, { prompts, criteria, name, model, timeout, snapshotDir });
   await bus.close();
 
   console.log("");
@@ -872,6 +877,7 @@ async function cmdMxit(args: string[]): Promise<void> {
   let parallel = false;
   let budget = 10;
   let sandbox = "developer";
+  let snapshotDir: string | undefined;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
@@ -881,6 +887,7 @@ async function cmdMxit(args: string[]): Promise<void> {
     else if (args[i] === "--parallel") parallel = true;
     else if (args[i] === "--budget" && args[i + 1]) budget = parseFloat(args[++i]);
     else if (args[i] === "--sandbox" && args[i + 1]) sandbox = args[++i];
+    else if (args[i] === "--snapshot-dir" && args[i + 1]) snapshotDir = args[++i];
   }
 
   const ledger = await loadLedger();
@@ -905,6 +912,7 @@ async function cmdMxit(args: string[]): Promise<void> {
     sandbox,
     onSignal: printSignal,
     ledger,
+    snapshotDir,
   });
 
   console.log("");

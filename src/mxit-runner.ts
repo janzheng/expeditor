@@ -21,6 +21,11 @@ import { Registry } from "./registry.ts";
 import { withTimeout } from "./timeout.ts";
 import { costGuard } from "./orchestrator.ts";
 import type { PermissionLedger } from "./permission-ledger.ts";
+// Lazy-loaded snapshot functions — avoids hard dependency on @snapshot/core
+async function loadSnapshot() {
+  const mod = await import("@snapshot/core");
+  return { init: mod.init, snapshot: mod.snapshot, restore: mod.restore };
+}
 
 export interface MxitRunnerOptions {
   /** Path to TASKS.md file */
@@ -47,6 +52,8 @@ export interface MxitRunnerOptions {
   onSignal?: (signal: import("./types.ts").AgentSignal) => void;
   /** Permission ledger for tracking denials and merging approvals */
   ledger?: PermissionLedger;
+  /** Directory to snapshot before each task (restore on failure) */
+  snapshotDir?: string;
 }
 
 export interface MxitRunResult {
@@ -120,6 +127,7 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
     recover = true,
     onSignal,
     ledger,
+    snapshotDir,
   } = opts;
 
   // Merge ledger approvals/rejections into sandbox
@@ -180,7 +188,7 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
         // Fan-out: process all ready tasks in parallel
         const batch = ready.slice(0, maxTasks - processed);
         const batchResults = await processBatch(
-          batch, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox, ledger },
+          batch, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox, ledger, snapshotDir },
         );
         results.push(...batchResults);
         totalCost += batchResults.reduce((sum, r) => sum + r.costUsd, 0);
@@ -189,7 +197,7 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
         // Sequential: process one task at a time
         const task = ready[0];
         const result = await processTask(
-          task, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox, ledger },
+          task, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox, ledger, snapshotDir },
         );
         results.push(result);
         totalCost += result.costUsd;
@@ -217,6 +225,7 @@ interface ProcessOpts {
   worktree?: boolean;
   sandbox: string | SandboxConfig;
   ledger?: PermissionLedger;
+  snapshotDir?: string;
 }
 
 /**
@@ -256,6 +265,15 @@ async function processTask(
     sandbox: opts.sandbox,
   };
 
+  // Snapshot before task so we can restore on failure
+  let preTaskSnapshotId: string | undefined;
+  const snap = opts.snapshotDir ? await loadSnapshot() : null;
+  if (snap && opts.snapshotDir) {
+    await snap.init(opts.snapshotDir);
+    const s = await snap.snapshot(opts.snapshotDir, { change: `pre-task-line-${task.line}`, summary: task.description.slice(0, 100) });
+    preTaskSnapshotId = s.id;
+  }
+
   try {
     const agent = await spawner.spawn(spawnOpts);
     const timeoutMs = opts.timeout * 1000;
@@ -264,22 +282,28 @@ async function processTask(
     unsub();
 
     if (result.timedOut) {
+      if (snap && opts.snapshotDir && preTaskSnapshotId) await snap.restore(opts.snapshotDir, preTaskSnapshotId);
       await failTask(tasksFile, task.line, `Timed out after ${opts.timeout}s`);
       console.log(`[mxit] Timed out: line ${task.line}`);
       return { task, status: "timed_out", exitCode: -1, agentId, costUsd: cost };
     }
 
     if (result.exitCode === 0) {
+      // Snapshot successful state
+      if (snap && opts.snapshotDir) await snap.snapshot(opts.snapshotDir, { change: `task-done-line-${task.line}`, summary: `Completed: ${task.description.slice(0, 80)}` });
       await completeTask(tasksFile, task.line, `agent ${agentId}`);
       console.log(`[mxit] Done: line ${task.line}`);
       return { task, status: "completed", exitCode: 0, agentId, costUsd: cost };
     }
 
+    // Failed — restore pre-task state
+    if (snap && opts.snapshotDir && preTaskSnapshotId) await snap.restore(opts.snapshotDir, preTaskSnapshotId);
     await failTask(tasksFile, task.line, `Exit code ${result.exitCode}`);
     console.log(`[mxit] Failed: line ${task.line} (exit ${result.exitCode})`);
     return { task, status: "failed", exitCode: result.exitCode, agentId, costUsd: cost };
   } catch (err) {
     unsub();
+    if (snap && opts.snapshotDir && preTaskSnapshotId) await snap.restore(opts.snapshotDir, preTaskSnapshotId).catch(() => {});
     await failTask(tasksFile, task.line, String(err).slice(0, 100));
     console.log(`[mxit] Error: line ${task.line} — ${String(err).slice(0, 100)}`);
     return { task, status: "failed", exitCode: -1, agentId, costUsd: cost };
