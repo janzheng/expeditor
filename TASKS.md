@@ -2,15 +2,15 @@
 
 Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** Feature complete. 18 source files, ~5,500 lines. 28 tests + 4 integration tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard. Claude Code skill.
+**Status:** Feature complete. 18 source files, ~6,000 lines. 29 tests + 5 snapshot tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard. Snapshot integration. Resilience guards.
 
-**Run tests:** `bash tests/phase0/run-all.sh` (13 pass) · `bash tests/phase1-2/run-all.sh` (11 pass) · `bash tests/test-ledger-cycle.sh` (12 pass) · `bash tests/test-workflow-synthesis.sh` (5 pass) · `deno run --allow-all tests/test-domain-filter.ts` (5 pass)
+**Run tests:** `bash tests/phase0/run-all.sh` (13 pass) · `bash tests/phase1-2/run-all.sh` (11 pass) · `bash tests/test-ledger-cycle.sh` (12 pass) · `bash tests/test-workflow-synthesis.sh` (5 pass) · `deno run --allow-all tests/test-domain-filter.ts` (5 pass) · `cd ../snapshot && deno task test` (5 pass)
 
 **Completed work:** See [TASKS.done.md](TASKS.done.md) for Phase 0-5 archive.
 
 ## Current
 
-`expo refine` shipped. `--auto-approve` shipped. 12 open tasks: 3 snapshot wiring into other patterns, 5 snapshot tests.
+All actionable work complete. 3 P3 items remain in design/question phase.
 
 ### Headless permissions — `--auto-approve` [shipped 2026-04-01]
 
@@ -185,7 +185,7 @@ src/
 
 tests/
 ├── phase0/             13 tests     Validate Claude Code primitives
-├── phase1-2/           10 tests     Unit + live tests for all phases
+├── phase1-2/           11 tests     Unit + live tests for all phases
 ├── test-ledger-cycle.sh             12 checks — full approve→re-run cycle
 ├── test-workflow-synthesis.sh       5 checks — fan-out + synthesis e2e
 ├── test-domain-filter.ts            5 checks — hook generation unit test
