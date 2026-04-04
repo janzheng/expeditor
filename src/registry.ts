@@ -26,6 +26,7 @@ const DEFAULT_REGISTRY_PATH = ".sigbus/registry.json";
 export class Registry {
   private entries: Map<string, RegistryEntry> = new Map();
   private filePath: string;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(opts?: { filePath?: string; cwd?: string }) {
     const cwd = opts?.cwd ?? Deno.cwd();
@@ -41,18 +42,26 @@ export class Registry {
       for (const entry of entries) {
         this.entries.set(entry.agentId, entry);
       }
-    } catch {
-      // File doesn't exist yet — start empty
-      this.entries.clear();
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) {
+        this.entries.clear();
+        return;
+      }
+      throw new Error(`Failed to load registry at ${this.filePath}: ${err instanceof SyntaxError ? "corrupt JSON — delete the file or fix manually" : String(err)}`);
     }
   }
 
-  /** Save registry to disk */
+  /** Save registry to disk — serialized via write queue to prevent concurrent corruption */
   async save(): Promise<void> {
-    const dir = this.filePath.substring(0, this.filePath.lastIndexOf("/"));
-    await Deno.mkdir(dir, { recursive: true });
-    const data = JSON.stringify(Array.from(this.entries.values()), null, 2);
-    await Deno.writeTextFile(this.filePath, data);
+    this.writeQueue = this.writeQueue.then(async () => {
+      const dir = this.filePath.substring(0, this.filePath.lastIndexOf("/"));
+      await Deno.mkdir(dir, { recursive: true });
+      const data = JSON.stringify(Array.from(this.entries.values()), null, 2);
+      await Deno.writeTextFile(this.filePath, data);
+    }).catch((err) => {
+      console.error(`[registry] save failed: ${String(err).slice(0, 200)}`);
+    });
+    await this.writeQueue;
   }
 
   /** Register a new agent */

@@ -570,6 +570,7 @@ exit 0
     const pipePromise = this.bus.pipeLines(lines, adapter);
 
     // Thrashing protection: kill agent if tool calls exceed limit
+    let killedByHarness = false;
     const maxToolCalls = opts.maxToolCalls ?? 0;
     if (maxToolCalls > 0) {
       let toolCallCount = 0;
@@ -586,6 +587,7 @@ exit 0
               type: "failed",
               payload: { error: `Agent killed: exceeded ${maxToolCalls} tool calls (thrashing protection)` },
             });
+            killedByHarness = true;
             try { process.kill("SIGTERM"); } catch { /* already dead */ }
             unsub();
           }
@@ -622,14 +624,16 @@ exit 0
         exitCode = status.code;
       } catch (err) {
         console.error(`[spawner] ${agentId} crashed:`, String(err).slice(0, 200));
-        // Emit a failed signal so the bus knows
-        await this.bus.emit({
-          agentId,
-          sessionId,
-          timestamp: Date.now(),
-          type: "failed",
-          payload: { error: `Agent crashed: ${String(err).slice(0, 200)}`, exitCode: -1 },
-        });
+        // Emit a failed signal so the bus knows (skip if harness already emitted one)
+        if (!killedByHarness) {
+          await this.bus.emit({
+            agentId,
+            sessionId,
+            timestamp: Date.now(),
+            type: "failed",
+            payload: { error: `Agent crashed: ${String(err).slice(0, 200)}`, exitCode: -1 },
+          });
+        }
       }
 
       const newStatus = exitCode === 0 ? "done" as const : "failed" as const;

@@ -43,6 +43,7 @@ const DEFAULT_LEDGER_PATH = ".expo/permissions.json";
 export class PermissionLedger {
   private entries: Map<string, PermissionEntry> = new Map();
   private filePath: string;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(opts?: { filePath?: string; cwd?: string }) {
     const cwd = opts?.cwd ?? Deno.cwd();
@@ -58,18 +59,26 @@ export class PermissionLedger {
       for (const entry of entries) {
         this.entries.set(entry.pattern, entry);
       }
-    } catch {
-      // File doesn't exist yet — start empty
-      this.entries.clear();
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) {
+        this.entries.clear();
+        return;
+      }
+      throw new Error(`Failed to load permission ledger at ${this.filePath}: ${err instanceof SyntaxError ? "corrupt JSON — delete the file or fix manually" : String(err)}`);
     }
   }
 
-  /** Save ledger to disk */
+  /** Save ledger to disk — serialized via write queue to prevent concurrent corruption */
   async save(): Promise<void> {
-    const dir = this.filePath.substring(0, this.filePath.lastIndexOf("/"));
-    await Deno.mkdir(dir, { recursive: true });
-    const data = JSON.stringify(Array.from(this.entries.values()), null, 2);
-    await Deno.writeTextFile(this.filePath, data);
+    this.writeQueue = this.writeQueue.then(async () => {
+      const dir = this.filePath.substring(0, this.filePath.lastIndexOf("/"));
+      await Deno.mkdir(dir, { recursive: true });
+      const data = JSON.stringify(Array.from(this.entries.values()), null, 2);
+      await Deno.writeTextFile(this.filePath, data);
+    }).catch((err) => {
+      console.error(`[permission-ledger] save failed: ${String(err).slice(0, 200)}`);
+    });
+    await this.writeQueue;
   }
 
   /** Record one or more denial patterns from an agent run */

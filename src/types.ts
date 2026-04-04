@@ -80,6 +80,8 @@ export interface DonePayload {
   permissionDenials?: string[];
   /** Rich denial details */
   denialDetails?: DenialDetail[];
+  /** True when agent hit max_turns but may have done partial work */
+  partialResult?: boolean;
 }
 
 export interface FailedPayload {

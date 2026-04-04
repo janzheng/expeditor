@@ -23,8 +23,13 @@ import { costGuard } from "./orchestrator.ts";
 import type { PermissionLedger } from "./permission-ledger.ts";
 // Lazy-loaded snapshot functions — avoids hard dependency on @snapshot/core
 async function loadSnapshot() {
-  const mod = await import("@snapshot/core");
-  return { init: mod.init, snapshot: mod.snapshot, restore: mod.restore };
+  try {
+    const mod = await import("@snapshot/core");
+    return { init: mod.init, snapshot: mod.snapshot, restore: mod.restore };
+  } catch (err) {
+    console.warn(`[snapshot] @snapshot/core not available: ${String(err).slice(0, 100)}. Continuing without snapshots.`);
+    return null;
+  }
 }
 
 export interface MxitRunnerOptions {
@@ -320,6 +325,18 @@ async function processBatch(
   spawner: AgentSpawner,
   opts: ProcessOpts,
 ): Promise<TaskResult[]> {
+  // Snapshot before batch so we can restore if ALL fail
+  let preBatchSnapshotId: string | undefined;
+  const snap = opts.snapshotDir ? await loadSnapshot() : null;
+  if (snap && opts.snapshotDir) {
+    await snap.init(opts.snapshotDir);
+    const s = await snap.snapshot(opts.snapshotDir, {
+      change: `pre-batch-${tasks.length}-tasks`,
+      summary: `Snapshot before parallel batch of ${tasks.length} tasks`,
+    });
+    preBatchSnapshotId = s.id;
+  }
+
   // Claim all tasks first
   for (const task of tasks) {
     const agentId = `mxit-${task.line}`;
@@ -329,21 +346,21 @@ async function processBatch(
 
   // Spawn all agents
   const spawnedAgents = [];
-  const costTrackers = new Map<string, { cost: number; unsub: () => void }>();
+  const costTrackers = new Map<string, { tracker: { cost: number }; unsub: () => void }>();
 
   for (const task of tasks) {
     const agentId = `mxit-${task.line}`;
     const prompt = buildTaskPrompt(task, tasksFile);
     const useWorktree = opts.worktree ?? (opts.agent === "claude");
 
-    let cost = 0;
+    const tracker = { cost: 0 };
     const unsub = bus.subscribe((signal) => {
       if (signal.agentId !== agentId) return;
       if (signal.type === "cost") {
-        cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
+        tracker.cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
       }
     });
-    costTrackers.set(agentId, { cost, unsub });
+    costTrackers.set(agentId, { tracker, unsub });
 
     const agent = await spawner.spawn({
       prompt,
@@ -369,9 +386,9 @@ async function processBatch(
 
   for (let i = 0; i < spawnedAgents.length; i++) {
     const { task, agentId } = spawnedAgents[i];
-    const tracker = costTrackers.get(agentId)!;
-    tracker.unsub();
-    const cost = tracker.cost;
+    const entry = costTrackers.get(agentId)!;
+    entry.unsub();
+    const cost = entry.tracker.cost;
     const s = settled[i];
 
     if (s.status === "rejected") {
@@ -391,6 +408,18 @@ async function processBatch(
       await failTask(tasksFile, task.line, `Exit code ${result.exitCode}`);
       results.push({ task, status: "failed", exitCode: result.exitCode, agentId, costUsd: cost });
     }
+  }
+
+  // Snapshot after batch: restore if ALL failed, snapshot success otherwise
+  const allFailed = results.every(r => r.status !== "completed");
+  if (allFailed && snap && opts.snapshotDir && preBatchSnapshotId) {
+    await snap.restore(opts.snapshotDir, preBatchSnapshotId);
+  } else if (!allFailed && snap && opts.snapshotDir) {
+    const doneCount = results.filter(r => r.status === "completed").length;
+    await snap.snapshot(opts.snapshotDir, {
+      change: `batch-done-${doneCount}-of-${results.length}`,
+      summary: results.filter(r => r.status === "completed").map(r => r.task.description.slice(0, 40)).join(", "),
+    });
   }
 
   return results;

@@ -17,8 +17,13 @@ import type { DenialDetail } from "./types.ts";
 // Lazy-loaded snapshot functions — only resolved when snapshotDir is provided.
 // This avoids hard dependency on @snapshot/core for tests that import orchestrator directly.
 async function loadSnapshot() {
-  const mod = await import("@snapshot/core");
-  return { init: mod.init, snapshot: mod.snapshot, restore: mod.restore };
+  try {
+    const mod = await import("@snapshot/core");
+    return { init: mod.init, snapshot: mod.snapshot, restore: mod.restore };
+  } catch (err) {
+    console.warn(`[snapshot] @snapshot/core not available: ${String(err).slice(0, 100)}. Continuing without snapshots.`);
+    return null;
+  }
 }
 
 // --- Review Loop ---
@@ -196,6 +201,27 @@ export async function race(
     preRaceSnapshotId = s.id;
   }
 
+  // Set up per-agent bus subscribers to capture output and cost
+  const agentTrackers = new Map<string, { tracker: { output: string; cost: number }; unsub: () => void }>();
+  for (let i = 0; i < n; i++) {
+    const agentId = `${prefix}-branch-${i + 1}`;
+    const tracker = { output: "", cost: 0 };
+    const unsub = bus.subscribe((signal) => {
+      if (signal.agentId !== agentId) return;
+      if (signal.type === "output") {
+        tracker.output += (signal.payload as Record<string, unknown>).text ?? "";
+      }
+      if (signal.type === "done") {
+        const result = (signal.payload as Record<string, unknown>).result;
+        if (typeof result === "string") tracker.output = result;
+      }
+      if (signal.type === "cost") {
+        tracker.cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
+      }
+    });
+    agentTrackers.set(agentId, { tracker, unsub });
+  }
+
   // Spawn all branches in parallel
   const spawnOpts: SpawnOptions[] = opts.prompts.map((prompt, i) => ({
     prompt,
@@ -210,14 +236,19 @@ export async function race(
     agents.map((a) => withTimeout(a.process, a.done, { timeoutMs })),
   );
 
-  // Collect outputs
+  // Collect outputs, costs, and unsubscribe
   const outputs: string[] = [];
   let totalCost = 0;
 
   for (let i = 0; i < agents.length; i++) {
-    const entry = spawner.getRegistry().get(agents[i].agentId);
-    // Get output from the last signal in the bus log — for now, collect from registry
-    outputs.push(`Branch ${i + 1}: ${results[i].status === "fulfilled" ? "completed" : "failed"}`);
+    const entry = agentTrackers.get(agents[i].agentId);
+    if (entry) {
+      entry.unsub();
+      outputs.push(entry.tracker.output || `Branch ${i + 1}: ${results[i].status === "fulfilled" ? "completed" : "failed"}`);
+      totalCost += entry.tracker.cost;
+    } else {
+      outputs.push(`Branch ${i + 1}: ${results[i].status === "fulfilled" ? "completed" : "failed"}`);
+    }
   }
 
   // If only one succeeded, auto-pick
@@ -543,13 +574,6 @@ export async function spawnAndWait(
       if (!vResult.success) {
         const stderr = new TextDecoder().decode(vResult.stderr).trim();
         validationFailed = `Validation failed (exit ${vResult.code}): ${opts.validateCommand}${stderr ? ` — ${stderr}` : ""}`;
-        await bus.emit({
-          agentId,
-          sessionId: agent.sessionId,
-          timestamp: Date.now(),
-          type: "failed",
-          payload: { error: validationFailed, exitCode: vResult.code, validationFailed: true },
-        }).catch(() => {});
       }
     } catch (err) {
       validationFailed = `Validation error: ${String(err).slice(0, 200)}`;
@@ -557,7 +581,7 @@ export async function spawnAndWait(
   }
 
   return {
-    output,
+    output: validationFailed ? `${output}\n\n[validation] ${validationFailed}` : output,
     cost,
     exitCode: validationFailed ? 1 : result.exitCode,
     timedOut: result.timedOut,
