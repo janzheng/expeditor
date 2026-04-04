@@ -136,11 +136,11 @@ Sourced from `/Users/janzheng/Desktop/Projects/_deno/apps/brigade/.brief/`. Brig
 
 ## Snapshot tests (`apps/snapshot/`)
 
-- [ ] Test hidden-git backend on a plain folder (init, snapshot, restore, branch) #snapshot
-- [ ] Test project-git backend on a git repo (init, snapshot, restore) #snapshot
-- [ ] Test discard logging (no file snapshot, appears in manifest) #snapshot
-- [ ] Test tree visualization output #snapshot
-- [ ] Test exclude patterns (node_modules etc. not in snapshots) #snapshot
+- [x] [done: snapshot_test.ts — init/snapshot/restore/branch, Deno copy replaces rsync] Test hidden-git backend on a plain folder (init, snapshot, restore, branch) #snapshot
+- [x] [done: snapshot_test.ts — git tags verified, restore via git checkout] Test project-git backend on a git repo (init, snapshot, restore) #snapshot
+- [x] [done: snapshot_test.ts — discards in manifest with correct parent/status, parent skips discarded] Test discard logging (no file snapshot, appears in manifest) #snapshot
+- [x] [done: snapshot_test.ts — ASCII tree with connectors, statuses, current marker] Test tree visualization output #snapshot
+- [x] [done: snapshot_test.ts — node_modules/.env/dist/__pycache__/.DS_Store all excluded] Test exclude patterns (node_modules etc. not in snapshots) #snapshot
 
 ## Discovered / Open Questions
 
