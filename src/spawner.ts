@@ -532,7 +532,13 @@ exit 0
       stderr: "piped",
     });
 
-    const process = command.spawn();
+    let process: Deno.ChildProcess;
+    try {
+      process = command.spawn();
+    } catch (err) {
+      if (settingsPath) this.cleanupSettingsFile(settingsPath);
+      throw err;
+    }
 
     // Pipe prompt via stdin when --allowedTools is used (variadic flag eats positional args)
     if (stdinPrompt && process.stdin) {
@@ -586,7 +592,7 @@ exit 0
               timestamp: Date.now(),
               type: "failed",
               payload: { error: `Agent killed: exceeded ${maxToolCalls} tool calls (thrashing protection)` },
-            });
+            }).catch(() => {}); // best-effort log write — process is being killed
             killedByHarness = true;
             try { process.kill("SIGTERM"); } catch { /* already dead */ }
             unsub();

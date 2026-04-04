@@ -1246,6 +1246,8 @@ function maybeAttachWebhook(bus: import("./bus.ts").SignalBus): void {
   import("./notify.ts").then(({ notifyHook }) => {
     notifyHook(bus, { webhookUrl: url, format });
     console.log(`${DIM}Webhook: ${url} (${format})${RESET}`);
+  }).catch((err) => {
+    console.error(`[webhook] Failed to load notify module: ${String(err).slice(0, 100)}`);
   });
 }
 

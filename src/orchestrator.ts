@@ -597,8 +597,8 @@ function parseGateVerdict(output: string, _gatePrompt: string): "DONE" | "ITERAT
     if (trimmed.startsWith("DONE")) return "DONE";
     if (trimmed.startsWith("ITERATE")) return "ITERATE";
   }
-  // Default: if no High severity issues mentioned, assume DONE
-  if (!upper.includes("HIGH")) return "DONE";
+  // Default: ITERATE is safer than DONE — avoids prematurely passing gate on garbage output
+  if (!upper.includes("HIGH") && (upper.includes("PASS") || upper.includes("LOOKS GOOD") || upper.includes("NO ISSUES"))) return "DONE";
   return "ITERATE";
 }
 
@@ -608,8 +608,8 @@ function parseRalphVerdict(output: string): "DONE" | "NEXT" {
     if (upper.startsWith("DONE") || upper.includes("COMPLETE") || upper.includes("FINISHED")) return "DONE";
     if (upper.startsWith("NEXT") || upper.includes("CONTINUE")) return "NEXT";
   }
-  // Default: DONE (fail-safe)
-  return "DONE";
+  // Default: NEXT is safer than DONE — avoids premature termination on garbage output
+  return "NEXT";
 }
 
 function parsePickVerdict(output: string, maxN: number): number {

@@ -349,7 +349,8 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
       try {
         output = await Deno.readTextFile(outputPath);
       } catch {
-        // Agent may not have written the file
+        console.warn(`[workflow] Agent ${name} succeeded but output file missing: ${outputPath}`);
+        output = `(no output file written by agent — expected at ${outputPath})`;
       }
       agentResults.push({ name, status: "success", cost, permissionDenials, output, exitCode: 0 });
     } else {

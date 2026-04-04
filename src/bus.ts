@@ -25,6 +25,8 @@ export class SignalBus {
   private logBytes = 0;
   private maxLogBytes: number;
   private encoder = new TextEncoder();
+  private rotating = false;
+  private pendingWrites: AgentSignal[] = [];
 
   constructor(opts?: BusOptions) {
     this.logFile = opts?.logFile ?? null;
@@ -34,6 +36,12 @@ export class SignalBus {
   /** Open log file for appending (call once at startup) */
   async init(): Promise<void> {
     if (this.logFile) {
+      // BUS-04: Close existing handle before re-init to prevent leak
+      if (this.logHandle) {
+        try { this.logHandle.close(); } catch { /* already closed */ }
+        this.logHandle = null;
+      }
+
       this.logHandle = await Deno.open(this.logFile, {
         write: true,
         create: true,
@@ -68,6 +76,12 @@ export class SignalBus {
 
     // Append to log file — with write protection and rotation
     if (this.logHandle && this.logFile) {
+      // BUS-02: Queue writes while rotating instead of dropping them
+      if (this.rotating) {
+        this.pendingWrites.push(signal);
+        return;
+      }
+
       try {
         // Strip _raw from logged signals to save space (it's the full original event)
         const loggable = { ...signal };
@@ -75,12 +89,15 @@ export class SignalBus {
         const line = JSON.stringify(loggable) + "\n";
         const bytes = this.encoder.encode(line);
 
-        await this.logHandle.write(bytes);
-        this.logBytes += bytes.byteLength;
-
-        // Rotate if over limit
-        if (this.logBytes > this.maxLogBytes) {
+        // BUS-03: Check size BEFORE writing to enforce a hard cap
+        if (this.logBytes + bytes.byteLength > this.maxLogBytes) {
           await this.rotate();
+        }
+
+        // After rotation, logHandle may be null if rotation failed fatally
+        if (this.logHandle) {
+          await this.logHandle.write(bytes);
+          this.logBytes += bytes.byteLength;
         }
       } catch (err) {
         // Log write failed (disk full, permissions, etc.) — don't crash the bus
@@ -89,12 +106,18 @@ export class SignalBus {
     }
   }
 
-  /** Rotate the log file — rename current to .1, start fresh */
+  /** Rotate the log file — rename current to .old, start fresh */
   private async rotate(): Promise<void> {
     if (!this.logFile || !this.logHandle) return;
 
+    // BUS-02: Set rotating flag to prevent concurrent emit() from writing to closed handle
+    this.rotating = true;
+    const handle = this.logHandle;
+    // BUS-02: Null out immediately so concurrent emit() sees no handle
+    this.logHandle = null;
+
     try {
-      this.logHandle.close();
+      handle.close();
 
       // Rename current → .old (overwrite any existing .old)
       const rotatedPath = this.logFile + ".old";
@@ -111,16 +134,51 @@ export class SignalBus {
 
       console.error(`[bus] log rotated: ${this.logFile} → ${rotatedPath}`);
     } catch (err) {
+      // BUS-01: On rotation failure, try harder to recover logging
       console.error(`[bus] rotation failed:`, String(err).slice(0, 200));
-      // Try to reopen the original file
-      try {
-        this.logHandle = await Deno.open(this.logFile, {
-          write: true,
-          create: true,
-          append: true,
-        });
-      } catch {
-        this.logHandle = null;
+
+      // The rename may or may not have happened. Try to open the original path,
+      // and if that fails, try a timestamped fallback so we don't lose signals.
+      const fallbacks = [
+        this.logFile,
+        `${this.logFile}.${Date.now()}`,
+      ];
+      for (const path of fallbacks) {
+        try {
+          this.logHandle = await Deno.open(path, {
+            write: true,
+            create: true,
+            append: true,
+          });
+          const stat = await Deno.stat(path);
+          this.logBytes = stat.size;
+          if (path !== this.logFile) {
+            console.error(`[bus] logging to fallback: ${path}`);
+          }
+          break;
+        } catch {
+          // Try next fallback
+        }
+      }
+
+      if (!this.logHandle) {
+        console.error(`[bus] FATAL: cannot open any log file — signals will not be persisted`);
+      }
+    } finally {
+      this.rotating = false;
+      // Flush any signals that arrived during rotation
+      const pending = this.pendingWrites.splice(0);
+      for (const signal of pending) {
+        if (this.logHandle) {
+          const loggable = { ...signal };
+          delete loggable._raw;
+          const line = JSON.stringify(loggable) + "\n";
+          const bytes = this.encoder.encode(line);
+          try {
+            await this.logHandle.write(bytes);
+            this.logBytes += bytes.byteLength;
+          } catch { /* best effort */ }
+        }
       }
     }
   }
@@ -173,10 +231,16 @@ export function lineStream(
 ): ReadableStream<string> {
   const decoder = new TextDecoder();
   let buffer = "";
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
 
   return new ReadableStream<string>({
-    async start(controller) {
-      const reader = readable.getReader();
+    start() {
+      reader = readable.getReader();
+    },
+
+    // BUS-05: Move read loop into pull() so the stream respects backpressure.
+    // pull() is only called when the downstream consumer is ready for more data.
+    async pull(controller) {
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -185,28 +249,36 @@ export function lineStream(
               controller.enqueue(buffer.trim());
             }
             controller.close();
-            break;
+            reader.releaseLock();
+            return;
           }
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
+          let enqueued = false;
           for (const line of lines) {
             if (line.trim()) {
               controller.enqueue(line.trim());
+              enqueued = true;
             }
           }
+          // If we enqueued at least one line, return to let the consumer
+          // process it before we read more (backpressure).
+          if (enqueued) return;
+          // No complete lines yet — keep reading in the same pull() call.
         }
       } catch (err) {
-        // Stream broke (process crashed, pipe closed, etc.)
-        // Flush what we have and close cleanly
-        if (buffer.trim()) {
-          try { controller.enqueue(buffer.trim()); } catch { /* controller may be closed */ }
-        }
-        try { controller.close(); } catch { /* already closed */ }
+        // BUS-06: On stream error, do NOT flush the buffer — it's likely a
+        // partial/truncated line (e.g. half-written JSON). Flushing it would
+        // emit invalid data that downstream JSON.parse would choke on.
         console.error(`[lineStream] stream error:`, String(err).slice(0, 200));
-      } finally {
+        try { controller.close(); } catch { /* already closed */ }
         reader.releaseLock();
       }
+    },
+
+    cancel() {
+      try { reader.releaseLock(); } catch { /* reader may not be acquired yet */ }
     },
   });
 }
