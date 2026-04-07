@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "exports": "./src/cli.ts",
   "imports": {
-    "@mxit/parser": "../mxit/src/mod.ts"
+    "@mxit/parser": "../fold/src/mod.ts",
+    "@snapshot/core": "../snapshot/src/mod.ts"
   },
   "tasks": {
     "expo": "deno run --allow-all src/cli.ts",

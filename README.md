@@ -164,6 +164,34 @@ expo mxit TASKS.md --parallel --max 5 --timeout 300
 
 Reads ready tasks, claims them, spawns agents, marks done/fail, cascades to newly-ready tasks.
 
+### Archive-based refinement
+
+Iterative improvement loop with snapshot/restore, inspired by [Hyperagents](https://arxiv.org/abs/2603.19461):
+
+```bash
+# Refine a directory with a rubric
+expo refine ./src --rubric "clarity, brevity, no dead code" --max 5
+
+# Continue a previous session
+expo refine ./src --continue
+
+# Branch from a specific variant
+expo refine ./src --branch-from 003
+
+# View the archive tree
+expo refine ./src --tree
+# └── 000 baseline — Initial state
+#     ├── 001 kept — Extracted helpers
+#     │   ├── 002 kept — Simplified error handling
+#     │   └── 003 discarded — Over-abstracted
+#     └── 004 kept — Branched: different approach
+
+# Use a rubric file
+expo refine ./src --rubric-file RUBRIC.md --max 10
+```
+
+Each iteration: agent makes ONE focused change → keeps or discards → snapshots or rolls back. On 3 consecutive discards, branches to an under-explored variant. Cross-session learning via REFINE.md.
+
 ## Commands
 
 | Command | Description |
@@ -180,6 +208,7 @@ Reads ready tasks, claims them, spawns agents, marks done/fail, cascades to newl
 | `expo ralph "<work>" "<gate>"` | Sequential task progression |
 | `expo workflow <file.md>` | Run a markdown workflow |
 | `expo mxit <TASKS.md>` | Execute tasks from a task file |
+| `expo refine <dir>` | Archive-based refinement loop |
 | `expo serve` | Web dashboard |
 | `expo permissions` | Manage permission ledger |
 | `expo watch <file.jsonl>` | Replay a bus log |
@@ -196,6 +225,12 @@ Reads ready tasks, claims them, spawns agents, marks done/fail, cascades to newl
 | `--review-agent TYPE` | review | Agent for review step |
 | `--parallel` | mxit | Fan out independent tasks |
 | `--budget N` | workflow | Max cost in USD |
+| `--rubric "..."` | refine | Quality criteria for refinement |
+| `--rubric-file F` | refine | Read rubric from file |
+| `--continue` | refine | Resume previous refinement session |
+| `--branch-from ID` | refine | Branch from a specific variant |
+| `--tree` | refine | Show archive tree and exit |
+| `--status` | refine | Show archive summary and exit |
 | `--auto-sync` | permissions approve/reject | Also sync to .claude/settings.local.json |
 
 ## Architecture

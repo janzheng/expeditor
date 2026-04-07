@@ -1,0 +1,38 @@
+[
+  {
+    "pattern": "WebFetch",
+    "status": "pending",
+    "firstSeen": 1775069019329,
+    "lastSeen": 1775071906945,
+    "count": 5,
+    "source": "hn-skip"
+  },
+  {
+    "pattern": "Bash(curl:*)",
+    "status": "pending",
+    "firstSeen": 1775069019329,
+    "lastSeen": 1775069019329,
+    "count": 3,
+    "source": "hn-fetch",
+    "examples": [
+      {
+        "command": "curl -s \"https://hacker-news.firebaseio.com/v0/topstories.json\" 2>&1 | python3 -c \"import sys,json; ids=json.load(sys.stdin)[:30]; print(json.dumps(ids))\"",
+        "description": "Fetch top 30 HN story IDs",
+        "source": "hn-fetch",
+        "timestamp": 1775069019329
+      },
+      {
+        "command": "curl -s \"https://hacker-news.firebaseio.com/v0/topstories.json\" 2>&1 | python3 -c \"import sys,json; ids=json.load(sys.stdin)[:30]; print(json.dumps(ids))\"",
+        "description": "Fetch top 30 HN story IDs",
+        "source": "hn-fetch",
+        "timestamp": 1775069019329
+      },
+      {
+        "command": "curl -s \"https://hacker-news.firebaseio.com/v0/topstories.json\" 2>&1 | python3 -c \"import sys,json; ids=json.load(sys.stdin)[:30]; print(json.dumps(ids))\"",
+        "description": "Fetch top 30 HN story IDs",
+        "source": "hn-fetch",
+        "timestamp": 1775069019329
+      }
+    ]
+  }
+]

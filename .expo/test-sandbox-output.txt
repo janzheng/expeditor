@@ -1,0 +1,61 @@
+[1mTesting: research sandbox[0m
+  Preset allows: mkdir, ls, cat, head, curl, jq
+  Preset denies: git, gh, sudo
+  Everything else: should prompt (= denied headless)
+
+  [2mtool_call: Bash → ls /tmp[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → mkdir -p /tmp/expo-sandbox-test[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → cat /etc/hostname[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → touch /tmp/expo-sandbox-test/file.txt[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → sed 's/a/b/' <<< "abc"[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → awk 'BEGIN{print "hello"}'[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → find /tmp -name "expo-sandbox-test" -maxdepth 1[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → chmod 644 /tmp/expo-sandbox-test/file.txt[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → mv /tmp/expo-sandbox-test/file.txt /tmp/expo-sandbox-test/mo[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → cp /tmp/expo-sandbox-test/moved.txt /tmp/expo-sandbox-test/c[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → python3 --version[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → node --version[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → git status[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → git log --oneline -1[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → curl -s httpbin.org/get | head -5[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → jq --version[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → rm /tmp/expo-sandbox-test/copy.txt[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → sudo ls /tmp[0m
+  [32m✓ approved[0m
+  [2mtool_call: Bash → echo "done"[0m
+  [32m✓ approved[0m
+
+[1mExit[0m: code 0
+
+[33mPermission denials captured (14):[0m
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
+  [31m✗[0m [object Object]
