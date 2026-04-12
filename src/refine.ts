@@ -14,14 +14,18 @@ import { SignalBus } from "./bus.ts";
 import { AgentSpawner, type AgentType } from "./spawner.ts";
 import { spawnAndWait } from "./orchestrator.ts";
 import {
-  init,
-  snapshot,
-  restore,
-  list,
-  tree,
+  addGate,
+  collectGates,
   discard,
+  init,
+  list,
+  listGates,
+  removeGate,
+  restore,
+  snapshot,
+  tree,
 } from "@snapshot/core";
-import type { Variant } from "@snapshot/core";
+import type { Gate, Variant } from "@snapshot/core";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -48,6 +52,14 @@ export interface RefineOptions {
   timeout?: number;
   /** Sandbox preset */
   sandbox?: string;
+  /** Initial gates to attach to the baseline variant. Inherited by all descendants.
+   *  Use for project-wide invariants like `deno test` or `deno check`. */
+  gates?: Array<{ name: string; command: string; rationale?: string }>;
+  /** If true, the agent may propose new gates via GATE_PROPOSAL lines.
+   *  Off by default — the feature is opt-in so runs stay comparable. */
+  allowAgentGates?: boolean;
+  /** Timeout (seconds) for each gate command. Default: 60. */
+  gateTimeout?: number;
 }
 
 export interface RefineResult {
@@ -57,12 +69,25 @@ export interface RefineResult {
   keptVariants: number;
   discardedVariants: number;
   finalVariantId: string;
+  /** Count of times an inherited gate forced a discard. */
+  gateFailures: number;
+  /** Count of gates the agent proposed (0 if `allowAgentGates` is off). */
+  gatesProposed: number;
+}
+
+interface GateProposal {
+  name: string;
+  command: string;
+  rationale?: string;
 }
 
 interface ParsedVerdict {
   action: "keep" | "discard" | "converged";
   change: string;
   summary: string;
+  /** Any GATE_PROPOSAL lines the agent emitted. Only used when
+   *  allowAgentGates is true; otherwise ignored. */
+  gateProposals: GateProposal[];
 }
 
 // ── Constants ──────────────────────────────────────────────────
@@ -101,6 +126,21 @@ export async function refine(
     variants = await list(dir);
   }
 
+  // 2b. Seed baseline gates from opts.gates, if provided and not already present.
+  //     These inherit to every descendant — perfect for project-wide invariants
+  //     like `deno test` or a type-check command.
+  if (opts.gates && opts.gates.length > 0) {
+    const baseline = variants.find((v) => v.status === "baseline");
+    if (baseline) {
+      const existing = new Set((await listGates(dir, baseline.id)).map((g) => g.name));
+      for (const g of opts.gates) {
+        if (!existing.has(g.name)) {
+          await addGate(dir, baseline.id, g);
+        }
+      }
+    }
+  }
+
   // Handle --branchFrom: restore to that variant before starting
   if (opts.branchFrom) {
     const target = variants.find((v) => v.id === opts.branchFrom);
@@ -116,6 +156,11 @@ export async function refine(
   // Consecutive discard tracking: parentId → count
   const discardCounts = new Map<string, number>();
 
+  // Counters for the result summary
+  let gateFailures = 0;
+  let gatesProposed = 0;
+  const gateTimeoutMs = (opts.gateTimeout ?? 60) * 1000;
+
   let iterations = 0;
   let finalVariantId = getLastKeptId(variants) ?? "000";
 
@@ -129,6 +174,7 @@ export async function refine(
 
     // a. Build agent prompt
     const archiveContext = buildArchiveContext(variants);
+    const inheritedGates = await collectGates(dir, currentParentId);
     const prompt = buildRefinePrompt({
       rubric: opts.rubric,
       heuristics: refineHeuristics,
@@ -136,6 +182,8 @@ export async function refine(
       iteration: iterations,
       maxIterations,
       dir,
+      inheritedGates,
+      allowAgentGates: opts.allowAgentGates ?? false,
     });
 
     // b. Spawn agent
@@ -209,10 +257,72 @@ export async function refine(
       // Update REFINE.md with session log
       await updateRefineMd(bus, spawner, dir, variants, opts);
 
-      return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId);
+      return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
     }
 
     if (verdict.action === "keep") {
+      // Run inherited gates BEFORE snapshotting. Any failure converts
+      // this keep into a forced discard — the invariant ratchet wins
+      // over the LLM's aesthetic judgment.
+      const gateResult = await runInheritedGates(
+        inheritedGates,
+        { dir, variantId: currentParentId, timeoutMs: gateTimeoutMs },
+      );
+
+      if (!gateResult.ok) {
+        gateFailures++;
+        await bus.emit({
+          agentId: agentName,
+          sessionId: crypto.randomUUID(),
+          timestamp: Date.now(),
+          type: "progress",
+          payload: {
+            kind: "status",
+            message: `gate_failed: ${gateResult.failed!.name} (exit ${gateResult.failed!.exitCode}) — forcing discard`,
+            gateFailed: gateResult.failed!.name,
+            gateExitCode: gateResult.failed!.exitCode,
+            iteration: iterations,
+          },
+        });
+        console.log(
+          `[refine] gate '${gateResult.failed!.name}' failed (exit ${gateResult.failed!.exitCode}) — discarding iteration ${iterations}`,
+        );
+
+        // Restore to the last kept state (in case the agent left the dir dirty),
+        // then log a discard with the gate-failure reason.
+        const lastKeptId = getLastKeptId(variants);
+        if (lastKeptId) {
+          await restore(dir, lastKeptId);
+        }
+        await discard(dir, {
+          change: verdict.change,
+          summary: `gate_failed:${gateResult.failed!.name} — ${verdict.summary}`.slice(0, 300),
+        });
+
+        const parentKey = lastKeptId || "root";
+        const count = (discardCounts.get(parentKey) ?? 0) + 1;
+        discardCounts.set(parentKey, count);
+
+        // Fall through to the same 3-consecutive-discards branching logic
+        // used by the rubric-discard path.
+        if (count >= MAX_CONSECUTIVE_DISCARDS) {
+          variants = await list(dir);
+          const branchTarget = findBestUnderExplored(variants, parentKey);
+          if (branchTarget) {
+            console.log(
+              `[refine] ${count} consecutive discards on ${parentKey} — branching to ${branchTarget.id} (${branchTarget.change})`,
+            );
+            await restore(dir, branchTarget.id);
+            discardCounts.set(parentKey, 0);
+          } else {
+            await updateRefineMd(bus, spawner, dir, variants, opts);
+            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+          }
+        }
+
+        continue;
+      }
+
       // Snapshot the kept state
       await snapshot(dir, {
         change: verdict.change,
@@ -220,6 +330,38 @@ export async function refine(
       });
       variants = await list(dir);
       finalVariantId = getLastKeptId(variants) ?? "000";
+
+      // Attach any agent-proposed gates to the newly kept variant.
+      // Only honoured when allowAgentGates is true; we already filtered
+      // in parseVerdict to an empty array otherwise.
+      if (opts.allowAgentGates && verdict.gateProposals.length > 0) {
+        for (const proposal of verdict.gateProposals) {
+          try {
+            await addGate(dir, finalVariantId, proposal);
+            gatesProposed++;
+            await bus.emit({
+              agentId: agentName,
+              sessionId: crypto.randomUUID(),
+              timestamp: Date.now(),
+              type: "progress",
+              payload: {
+                kind: "status",
+                message: `gate_added: ${proposal.name} on ${finalVariantId}`,
+                gateAdded: proposal.name,
+                gateCommand: proposal.command,
+                iteration: iterations,
+              },
+            });
+            console.log(
+              `[refine] agent added gate '${proposal.name}' on ${finalVariantId}: ${proposal.command.slice(0, 80)}`,
+            );
+          } catch (err) {
+            console.error(
+              `[refine] failed to add gate '${proposal.name}': ${String(err).slice(0, 200)}`,
+            );
+          }
+        }
+      }
 
       // Reset consecutive discard count for this lineage
       discardCounts.set(finalVariantId, 0);
@@ -253,7 +395,7 @@ export async function refine(
         } else {
           // No under-explored variants — all branches exhausted
           await updateRefineMd(bus, spawner, dir, variants, opts);
-          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId);
+          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
         }
       }
     }
@@ -263,7 +405,67 @@ export async function refine(
   variants = await list(dir);
   finalVariantId = getLastKeptId(variants) ?? "000";
   await updateRefineMd(bus, spawner, dir, variants, opts);
-  return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId);
+  return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+}
+
+// ── Gate runner ────────────────────────────────────────────────
+
+interface GateFailure {
+  name: string;
+  exitCode: number;
+  stderr: string;
+}
+
+interface GateRunResult {
+  ok: boolean;
+  failed?: GateFailure;
+}
+
+/** Run inherited gates one at a time against the current state of `dir`.
+ *  Short-circuits on the first failure — there's no value in running the
+ *  rest if one already says the candidate is unacceptable. */
+async function runInheritedGates(
+  gates: Gate[],
+  opts: { dir: string; variantId: string; timeoutMs: number },
+): Promise<GateRunResult> {
+  for (const gate of gates) {
+    const cmd = gate.command
+      .replaceAll("{dir}", opts.dir)
+      .replaceAll("{variantId}", opts.variantId);
+
+    const proc = new Deno.Command("sh", {
+      args: ["-c", cmd],
+      cwd: opts.dir,
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill("SIGKILL"); } catch { /* already exited */ }
+    }, opts.timeoutMs);
+
+    let output;
+    try {
+      output = await proc.output();
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!output.success) {
+      const stderr = new TextDecoder().decode(output.stderr).slice(0, 500);
+      return {
+        ok: false,
+        failed: {
+          name: gate.name,
+          exitCode: timedOut ? -1 : output.code,
+          stderr: timedOut ? "timeout" : stderr,
+        },
+      };
+    }
+  }
+  return { ok: true };
 }
 
 // ── Prompt building ────────────────────────────────────────────
@@ -275,6 +477,8 @@ interface PromptContext {
   iteration: number;
   maxIterations: number;
   dir: string;
+  inheritedGates: Gate[];
+  allowAgentGates: boolean;
 }
 
 function buildRefinePrompt(ctx: PromptContext): string {
@@ -302,6 +506,19 @@ function buildRefinePrompt(ctx: PromptContext): string {
     parts.push("");
   }
 
+  if (ctx.inheritedGates.length > 0) {
+    parts.push("## Inherited gates (invariants your change MUST preserve)");
+    parts.push(
+      "These commands will run automatically after your change. If any exits non-zero, your change will be auto-discarded regardless of the rubric. Make sure your change doesn't break any of them.",
+    );
+    parts.push("");
+    for (const g of ctx.inheritedGates) {
+      const rationale = g.rationale ? ` — ${g.rationale}` : "";
+      parts.push(`- **${g.name}**: \`${g.command}\`${rationale}`);
+    }
+    parts.push("");
+  }
+
   parts.push("## Instructions");
   parts.push("");
   parts.push("1. Examine the current state of the project");
@@ -320,6 +537,25 @@ function buildRefinePrompt(ctx: PromptContext): string {
   parts.push("- CONVERGED: The project meets the rubric criteria and no further improvements are needed.");
   parts.push("- Make exactly ONE focused change per iteration — do not try to fix everything at once.");
   parts.push("- If you are not sure whether a change helps, lean toward DISCARD so we can try a different approach.");
+
+  if (ctx.allowAgentGates) {
+    parts.push("");
+    parts.push("## Optional: proposing a gate");
+    parts.push("");
+    parts.push(
+      "If your KEEP change fixes a fragile behavior that descendants should NEVER regress, you MAY propose a gate. A gate is a shell command that will run before every future variant on this lineage; any non-zero exit auto-discards that variant.",
+    );
+    parts.push("");
+    parts.push("Add one or more GATE_PROPOSAL lines before your VERDICT block, in JSON:");
+    parts.push("");
+    parts.push("```");
+    parts.push(
+      'GATE_PROPOSAL: {"name": "auth_tests", "command": "deno test tests/auth/", "rationale": "spent 3 iterations; easy to regress"}',
+    );
+    parts.push("```");
+    parts.push("");
+    parts.push("Propose gates ONLY for non-negotiable behaviors. Do NOT gate every passing test — that over-constrains the search. Only propose on KEEP verdicts. Gates can use `{dir}` and `{variantId}` placeholders.");
+  }
 
   return parts.join("\n");
 }
@@ -344,13 +580,15 @@ function buildArchiveContext(variants: Variant[]): string {
 
 // ── Verdict parsing ────────────────────────────────────────────
 
-function parseVerdict(output: string): ParsedVerdict {
+// Exported for unit testing only — not part of the public API.
+export function parseVerdict(output: string): ParsedVerdict {
   // Try to find structured verdict in the output
   const lines = output.split("\n");
 
   let action: "keep" | "discard" | "converged" | null = null;
   let change = "";
   let summary = "";
+  const gateProposals: GateProposal[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -374,6 +612,13 @@ function parseVerdict(output: string): ParsedVerdict {
     const summaryMatch = trimmed.match(/^SUMMARY:\s*(.+)/i);
     if (summaryMatch) {
       summary = summaryMatch[1].trim();
+    }
+
+    // Match GATE_PROPOSAL: {...}
+    const gateMatch = trimmed.match(/^GATE_PROPOSAL:\s*(.+)$/i);
+    if (gateMatch) {
+      const proposal = parseGateProposalLine(gateMatch[1]);
+      if (proposal) gateProposals.push(proposal);
     }
   }
 
@@ -399,7 +644,36 @@ function parseVerdict(output: string): ParsedVerdict {
     change = extractFirstMeaningfulLine(output);
   }
 
-  return { action, change, summary };
+  return { action, change, summary, gateProposals };
+}
+
+/** Parse a single GATE_PROPOSAL line payload. Returns null on any error
+ *  so a malformed proposal just gets silently ignored instead of crashing
+ *  the whole refine loop. */
+function parseGateProposalLine(payload: string): GateProposal | null {
+  try {
+    const parsed = JSON.parse(payload);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      typeof parsed.name !== "string" ||
+      typeof parsed.command !== "string" ||
+      parsed.name.length === 0 ||
+      parsed.command.length === 0
+    ) {
+      return null;
+    }
+    const proposal: GateProposal = {
+      name: parsed.name,
+      command: parsed.command,
+    };
+    if (typeof parsed.rationale === "string" && parsed.rationale.length > 0) {
+      proposal.rationale = parsed.rationale;
+    }
+    return proposal;
+  } catch {
+    return null;
+  }
 }
 
 function extractFirstMeaningfulLine(output: string): string {
@@ -532,6 +806,8 @@ function buildResult(
   totalCostUsd: number,
   variants: Variant[],
   finalVariantId: string,
+  gateFailures: number,
+  gatesProposed: number,
 ): RefineResult {
   return {
     verdict,
@@ -540,6 +816,8 @@ function buildResult(
     keptVariants: variants.filter((v) => v.status === "kept" || v.status === "baseline").length,
     discardedVariants: variants.filter((v) => v.status === "discarded").length,
     finalVariantId,
+    gateFailures,
+    gatesProposed,
   };
 }
 
@@ -607,5 +885,102 @@ export async function showRefineStatus(dir: string): Promise<void> {
     }
   } catch (err) {
     console.error(`[refine] Failed to show status: ${String(err).slice(0, 200)}`);
+  }
+}
+
+// ── Gate subcommand helpers (for `expo refine <dir> gate ...`) ──
+
+/** Print every gate in the archive, showing where each is directly attached
+ *  and which variants inherit it. When variantId is given, only show gates
+ *  that variant sees (direct + inherited). */
+export async function showRefineGates(dir: string, variantId?: string): Promise<void> {
+  try {
+    await init(dir);
+    const variants = await list(dir);
+
+    if (variants.length === 0) {
+      console.log("No refinement sessions found.");
+      return;
+    }
+
+    if (variantId) {
+      const target = variants.find((v) => v.id === variantId);
+      if (!target) {
+        console.error(`Variant ${variantId} not found.`);
+        Deno.exit(1);
+      }
+      const direct = await listGates(dir, variantId);
+      const inherited = await collectGates(dir, variantId);
+      const directNames = new Set(direct.map((g) => g.name));
+
+      console.log(`Gates visible to variant [${variantId}] (${target.change || target.summary || ""}):`);
+      if (inherited.length === 0) {
+        console.log("  (none)");
+        return;
+      }
+      for (const g of inherited) {
+        const source = directNames.has(g.name) ? "direct" : `inherited from [${g.addedBy}]`;
+        console.log(`  • ${g.name} (${source})`);
+        console.log(`      command: ${g.command}`);
+        if (g.rationale) console.log(`      why:     ${g.rationale}`);
+      }
+      return;
+    }
+
+    // No variantId — show gates across the whole archive, grouped by where
+    // each was added.
+    let total = 0;
+    for (const v of variants) {
+      const gates = v.gates ?? [];
+      if (gates.length === 0) continue;
+      total += gates.length;
+      console.log(`[${v.id}] ${v.status} — ${v.change || v.summary || ""}`);
+      for (const g of gates) {
+        console.log(`  • ${g.name}: ${g.command}`);
+        if (g.rationale) console.log(`      why: ${g.rationale}`);
+      }
+    }
+    if (total === 0) {
+      console.log("No gates in this archive. Use `expo refine <dir> gate add <variant> --name N --command C` to add one.");
+    } else {
+      console.log(`\n${total} gate${total === 1 ? "" : "s"} across ${variants.length} variant${variants.length === 1 ? "" : "s"}.`);
+    }
+  } catch (err) {
+    console.error(`[refine] Failed to list gates: ${String(err).slice(0, 200)}`);
+    Deno.exit(1);
+  }
+}
+
+/** CLI wrapper around addGate with useful error messages. */
+export async function addRefineGate(
+  dir: string,
+  variantId: string,
+  gate: { name: string; command: string; rationale?: string },
+): Promise<void> {
+  try {
+    await init(dir);
+    const added = await addGate(dir, variantId, gate);
+    console.log(`✓ Added gate '${added.name}' to [${variantId}]`);
+    console.log(`  command: ${added.command}`);
+    if (added.rationale) console.log(`  why:     ${added.rationale}`);
+  } catch (err) {
+    console.error(`[refine] Failed to add gate: ${String(err).slice(0, 200)}`);
+    Deno.exit(1);
+  }
+}
+
+/** CLI wrapper around removeGate. */
+export async function removeRefineGate(
+  dir: string,
+  variantId: string,
+  name: string,
+): Promise<void> {
+  try {
+    await init(dir);
+    await removeGate(dir, variantId, name);
+    console.log(`✓ Removed gate '${name}' from [${variantId}]`);
+  } catch (err) {
+    console.error(`[refine] Failed to remove gate: ${String(err).slice(0, 200)}`);
+    Deno.exit(1);
   }
 }

@@ -1079,12 +1079,22 @@ async function cmdRefine(args: string[]): Promise<void> {
     return;
   }
 
+  // `expo refine <dir> gate list|add|remove [...]` subcommand
+  if (args[1] === "gate") {
+    await cmdRefineGate(args);
+    return;
+  }
+
   if (!dir) {
     console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--continue] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N]");
+    console.error("                       [--gate \"name=command\"] [--allow-agent-gates] [--gate-timeout N]");
     console.error("");
     console.error("Quick commands:");
     console.error("  expo refine <dir> --tree     Show archive tree");
     console.error("  expo refine <dir> --status   Show archive summary");
+    console.error("  expo refine <dir> gate list [variant_id]");
+    console.error("  expo refine <dir> gate add <variant_id> --name N --command C [--rationale R]");
+    console.error("  expo refine <dir> gate remove <variant_id> --name N");
     Deno.exit(1);
   }
 
@@ -1100,6 +1110,9 @@ async function cmdRefine(args: string[]): Promise<void> {
   let agent: AgentType = "claude";
   let timeout: number | undefined;
   let sandbox = "developer";
+  const gates: Array<{ name: string; command: string; rationale?: string }> = [];
+  let allowAgentGates = false;
+  let gateTimeout: number | undefined;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
@@ -1113,6 +1126,16 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
     else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
     else if (args[i] === "--sandbox" && args[i + 1]) sandbox = args[++i];
+    else if (args[i] === "--gate" && args[i + 1]) {
+      const parsed = parseGateFlag(args[++i]);
+      if (parsed) gates.push(parsed);
+      else {
+        console.error(`${RED}Invalid --gate value: expected "name=command"${RESET}`);
+        Deno.exit(1);
+      }
+    }
+    else if (args[i] === "--allow-agent-gates") allowAgentGates = true;
+    else if (args[i] === "--gate-timeout" && args[i + 1]) gateTimeout = parseInt(args[++i]);
   }
 
   // Load rubric from file if specified
@@ -1145,6 +1168,13 @@ async function cmdRefine(args: string[]): Promise<void> {
   if (continueSession) console.log(`  Mode:       continue previous session`);
   if (branchFrom) console.log(`  Branch from: ${branchFrom}`);
   if (interactive) console.log(`  Interactive: yes`);
+  if (gates.length > 0) {
+    console.log(`  Gates:      ${gates.length} seeded on baseline`);
+    for (const g of gates) {
+      console.log(`              • ${g.name}: ${g.command.slice(0, 70)}`);
+    }
+  }
+  if (allowAgentGates) console.log(`  Agent gates: enabled (agent may propose new gates)`);
   console.log(`  Log:        ${logFile}`);
   console.log("");
 
@@ -1161,6 +1191,9 @@ async function cmdRefine(args: string[]): Promise<void> {
     agent,
     timeout,
     sandbox,
+    gates: gates.length > 0 ? gates : undefined,
+    allowAgentGates,
+    gateTimeout,
   });
 
   unguard();
@@ -1173,6 +1206,12 @@ async function cmdRefine(args: string[]): Promise<void> {
   console.log(`  Iterations: ${result.iterations}`);
   console.log(`  Kept:       ${result.keptVariants}`);
   console.log(`  Discarded:  ${result.discardedVariants}`);
+  if (result.gateFailures > 0) {
+    console.log(`  Gate fails: ${YELLOW}${result.gateFailures}${RESET} (variants forced-discarded by inherited gates)`);
+  }
+  if (result.gatesProposed > 0) {
+    console.log(`  Gates added: ${result.gatesProposed} (agent-proposed)`);
+  }
   console.log(`  Final:      [${result.finalVariantId}]`);
   console.log(`  Cost:       $${result.totalCostUsd.toFixed(4)}`);
 
@@ -1181,6 +1220,84 @@ async function cmdRefine(args: string[]): Promise<void> {
     console.log(`  ${DIM}Continue: expo refine ${dir} --continue --max ${maxIterations}${RESET}`);
     console.log(`  ${DIM}Tree:     expo refine ${dir} --tree${RESET}`);
   }
+}
+
+/** Parse a --gate "name=command" flag value. Splits on the first `=`
+ *  so commands can freely contain equals signs. */
+function parseGateFlag(value: string): { name: string; command: string } | null {
+  const idx = value.indexOf("=");
+  if (idx <= 0 || idx === value.length - 1) return null;
+  const name = value.slice(0, idx).trim();
+  const command = value.slice(idx + 1).trim();
+  if (!name || !command) return null;
+  return { name, command };
+}
+
+/** Handle `expo refine <dir> gate list|add|remove [...]` subcommands. */
+async function cmdRefineGate(args: string[]): Promise<void> {
+  const dir = args[0];
+  const sub = args[2]; // args[1] is always "gate"
+
+  if (!dir || !sub) {
+    console.error("Usage:");
+    console.error("  expo refine <dir> gate list [variant_id]");
+    console.error("  expo refine <dir> gate add <variant_id> --name N --command C [--rationale R]");
+    console.error("  expo refine <dir> gate remove <variant_id> --name N");
+    Deno.exit(1);
+  }
+
+  if (sub === "list") {
+    const variantId = args[3];
+    const { showRefineGates } = await import("./refine.ts");
+    await showRefineGates(dir, variantId);
+    return;
+  }
+
+  if (sub === "add") {
+    const variantId = args[3];
+    if (!variantId) {
+      console.error(`${RED}Usage: expo refine <dir> gate add <variant_id> --name N --command C [--rationale R]${RESET}`);
+      Deno.exit(1);
+    }
+    let name: string | undefined;
+    let command: string | undefined;
+    let rationale: string | undefined;
+    for (let i = 4; i < args.length; i++) {
+      if (args[i] === "--name" && args[i + 1]) name = args[++i];
+      else if (args[i] === "--command" && args[i + 1]) command = args[++i];
+      else if (args[i] === "--rationale" && args[i + 1]) rationale = args[++i];
+    }
+    if (!name || !command) {
+      console.error(`${RED}--name and --command are required${RESET}`);
+      Deno.exit(1);
+    }
+    const { addRefineGate } = await import("./refine.ts");
+    await addRefineGate(dir, variantId, { name, command, rationale });
+    return;
+  }
+
+  if (sub === "remove") {
+    const variantId = args[3];
+    if (!variantId) {
+      console.error(`${RED}Usage: expo refine <dir> gate remove <variant_id> --name N${RESET}`);
+      Deno.exit(1);
+    }
+    let name: string | undefined;
+    for (let i = 4; i < args.length; i++) {
+      if (args[i] === "--name" && args[i + 1]) name = args[++i];
+    }
+    if (!name) {
+      console.error(`${RED}--name is required${RESET}`);
+      Deno.exit(1);
+    }
+    const { removeRefineGate } = await import("./refine.ts");
+    await removeRefineGate(dir, variantId, name);
+    return;
+  }
+
+  console.error(`${RED}Unknown gate subcommand: ${sub}${RESET}`);
+  console.error("Expected: list | add | remove");
+  Deno.exit(1);
 }
 
 // --- Init scaffolding ---
@@ -1360,6 +1477,9 @@ ${BOLD}Commands:${RESET}
   refine <dir> [flags]      Archive-based refinement loop (keep/discard/branch)
   refine <dir> --tree       Show snapshot archive tree
   refine <dir> --status     Show archive summary
+  refine <dir> gate list    Show gates inherited by each variant
+  refine <dir> gate add     Attach a named gate to a variant (inherits to descendants)
+  refine <dir> gate remove  Remove a named gate from a variant
   serve [--port N]          Web dashboard — live agent cards in browser
   permissions               List permission ledger entries
   permissions approve <p>   Approve a permission pattern for future runs

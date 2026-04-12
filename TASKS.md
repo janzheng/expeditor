@@ -95,6 +95,34 @@ Design specs: `github-repos/research/hyperagents/_workshop/expo-local-worktrees.
 - [x] [done: ReviewLoopOptions.snapshotDir — baseline + pre-iteration snapshots, restore on ITERATE] `expo review` — snapshot before each review cycle, rollback on gate fail #snapshot
 - [x] [done: MxitRunnerOptions.snapshotDir — pre-task snapshot, restore on fail/timeout, snapshot on success] `expo mxit` — snapshot before each task, restore on failure #snapshot
 
+### Gate ratchet — invariant inheritance [shipped 2026-04-12] #refine
+
+Per-variant gate commands that inherit down the archive tree. Prevents LLM-rubric-based refinement from silently regressing load-bearing behavior during long unattended sessions. Pattern sourced from evo (autonomous code optimizer).
+
+Research context (in `/Users/janzheng/Desktop/Projects/__resources/github-repos/`):
+- `evo/notes.md` — full evo research notes with architecture + mechanism breakdown
+- `_workshop/gate-ratchet-pattern.md` — the pattern written up portably
+- `evo/evo/src/evo/core.py:643` — reference `collect_gates_from_path` (~10 lines)
+
+- [x] [done: see .brief/gate-ratchet.md for shipped details + smoke-test transcript] Gate ratchet for `expo refine` `-> .brief/gate-ratchet.md` #refine
+  - [x] [done: `Gate` type + `gates?: Gate[]` field on Variant, exported from `@snapshot/core`] Extend `@snapshot/core` Variant schema with `gates: {name, command, addedAt, addedBy, rationale?}[]`
+  - [x] [done: `apps/snapshot/src/snapshot.ts` — walks parent chain, dedupes by name, child overrides ancestor same-name] Add `collectGates(archive, variantId)`
+  - [x] [done: `runInheritedGates` helper in `src/refine.ts`; runs gates before snapshot on KEEP, forces discard with `gate_failed:<name>` reason on any non-zero exit, falls through to 3-consecutive-discards branching logic] Wire into `src/refine.ts` accept path
+  - [x] [done: opt-in via `--allow-agent-gates`; GATE_PROPOSAL: {...} JSON lines parsed by `parseVerdict`; attached to newly kept variant after successful snapshot] Teach the refine agent prompt to propose gates
+  - [x] [done: `expo refine <dir> gate list [variant_id]` / `add <id> --name N --command C [--rationale R]` / `remove <id> --name N`] CLI: `expo refine gate list|add|remove <variant_id>`
+  - [x] [done: `tree()` in `@snapshot/core` shows `[gates: N]` when present, skips when absent] Show gate counts in `--tree` output
+  - [x] [done: emits `progress` signal with `gateFailed` / `gateAdded` payload fields] Emit gate events on the signal bus for dashboard surfacing
+  - [x] [done: `--gate "name=command"` CLI flag seeds gates onto baseline; repeatable for multiple gates] Low-risk root-gate flag
+  - [x] [done: unit tests `tests/test-refine-gates.ts` (24 passing) + `apps/snapshot/src/snapshot_test.ts` gate tests (7 new, all 12 pass); smoke-tested CLI end-to-end] Tests + smoke test
+  - [x] [done: manifest now tracks `head` — set by restore(), read+advanced by snapshot(), read-only by discard(); 5 new tests; benefits race/review/mxit too since they all use snapshot/restore] Fix: `snapshot()` used to always parent off last-non-discarded regardless of restore, producing linear chains instead of trees
+
+### Future gate-ratchet extensions #refine #future
+
+- [?] Gate promotion — auto-move a gate up the tree when N descendants independently add the same-named gate
+- [?] `--gate-file <path>` flag — load multiple gates from a YAML/JSON file for repeatable configurations
+- [?] Dashboard gate UI — list gates per variant, show which inherited, manual add/remove from browser
+- [?] Timeout per-gate (currently one global `--gate-timeout` for all gates)
+
 ## Brigade Learnings — Ported Fixes & Patterns
 
 Sourced from `/Users/janzheng/Desktop/Projects/_deno/apps/brigade/.brief/`. Brigade hit these bugs in production; expo has the same code paths.
