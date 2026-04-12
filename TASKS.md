@@ -132,15 +132,26 @@ Lens: **expo as a tool LLM agents reach for, not just humans at a terminal.** Co
 
 ### Audit pass
 
-- [@audit-agent] Run speed / security / agentic-UX audit on expo source `-> .brief/agentic-audit.md` #audit #agentic-ux
-  - [*] Launched via `expo spawn` on 2026-04-12; findings written to `.brief/agentic-audit.md`
-  - [*] Prompt focuses on: speed bottlenecks, security concerns, agentic-UX friction when an LLM orchestrates expo
-  - [*] After completion, triage findings into TASKS-AGENTIC-UX.md and/or TASKS-AUDIT.md
+- [x] [done: 16 verified findings — 3 P1, 10 P2, 3 P3 — in .brief/agentic-audit.md; $1.80, 23 turns, 288s] Run speed / security / agentic-UX audit on expo source `-> .brief/agentic-audit.md` #audit #agentic-ux
+  - [*] Confirms several pre-existing open items from TASKS-AUDIT.md (A017 workflow silent success; A022 withTimeout kill gap) are still real
+  - [*] Biggest new finding: `expo serve` P1 — unauthenticated POST /api/spawn binds 0.0.0.0, any browser tab can launch arbitrary commands
 
-### Priority 1 — do first (unblock unattended runs)
+### Priority 1 — do first (from audit findings + unblock unattended runs)
 
+Audit-driven P1s (see `.brief/agentic-audit.md`):
+
+- [ ] `expo serve` has unauthenticated POST /api/spawn binding 0.0.0.0 `-> .brief/agentic-audit.md` #security #serve
+  - [*] Browser tabs or LAN peers can launch arbitrary expo commands. Needs bind to 127.0.0.1 + bearer token on mutating routes.
+- [ ] `workflow` reports success when agent wrote nothing `-> .brief/agentic-audit.md` #workflow #silent-failure
+  - [*] Duplicate of A017 in old TASKS-AUDIT.md, still open. Needs "empty" status + structured reason in result JSON.
+- [!] [in-progress: porting runInheritedGates pattern to timeout.ts] `withTimeout` kills only leader PID, not process group `-> .brief/agentic-audit.md` #timeout #resource-leak
+  - [*] Same bug I just fixed for gates in refine.ts. timeout.ts is used by every spawn path (spawn/race/review/mxit/refine). Fix = setsid + kill -SIG -pgid, pattern already exists in runInheritedGates.
+
+Audit-driven + wishlist P1s:
+
+- [ ] Verify cost-guard enforces (not just logs) + distinct exit code `-> .brief/agentic-audit.md` #security #budget
+  - [*] Confirmed in audit — currently only `console.warn`s on overrun. Self-playtest showed iter-3 completed after the "exceeds budget" warning.
 - [ ] `gate check` subcommand — verify gates pass before firing a long refine loop `-> TASKS-AGENTIC-UX.md` #agentic-ux #gates
-- [ ] Verify cost-guard enforces (not just logs) + distinct exit code `-> TASKS-AGENTIC-UX.md` #security #budget
 - [ ] Per-run wall-clock timeout (`--run-timeout`) `-> TASKS-AGENTIC-UX.md` #safety #resilience
 - [ ] Verdict parser — fenced `<verdict>` block grammar `-> TASKS-AGENTIC-UX.md` #parsing
 

@@ -154,6 +154,29 @@ export class AgentSpawner {
   private baseCwd: string;
   private spawnDefaults: Partial<SpawnOptions> = {};
 
+  /** Per-process cache — computed once, reused for every spawn. */
+  private static _setsidAvailable: boolean | undefined;
+
+  /** Check whether `setsid` is on PATH. Used by spawn() to decide whether
+   *  to launch agents as their own session leader (so `kill -<pid>` on
+   *  timeout reaches forked grandchildren). Cached after first lookup. */
+  static async hasSetsid(): Promise<boolean> {
+    if (AgentSpawner._setsidAvailable !== undefined) {
+      return AgentSpawner._setsidAvailable;
+    }
+    try {
+      const out = await new Deno.Command("sh", {
+        args: ["-c", "command -v setsid"],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      AgentSpawner._setsidAvailable = out.success;
+    } catch {
+      AgentSpawner._setsidAvailable = false;
+    }
+    return AgentSpawner._setsidAvailable;
+  }
+
   constructor(bus: SignalBus, opts?: { cwd?: string; registry?: Registry }) {
     this.bus = bus;
     this.baseCwd = opts?.cwd ?? Deno.cwd();
@@ -524,8 +547,16 @@ exit 0
 
     const { cmd, args, stdinPrompt } = this.buildCommand({ ...opts, sessionId, cwd, settingsPath });
 
-    const command = new Deno.Command(cmd, {
-      args,
+    // Launch the agent as a new session/process-group leader via `setsid` so
+    // child subprocesses (git, rg, curl, test runners) can be killed as a
+    // group on timeout instead of leaking. Falls back to a direct exec when
+    // setsid isn't on PATH (non-Linux/macOS envs, stripped containers).
+    const detached = await AgentSpawner.hasSetsid();
+    const spawnCmd = detached ? "setsid" : cmd;
+    const spawnArgs = detached ? [cmd, ...args] : args;
+
+    const command = new Deno.Command(spawnCmd, {
+      args: spawnArgs,
       cwd,
       stdin: stdinPrompt ? "piped" : "null",
       stdout: "piped",

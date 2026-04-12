@@ -2,6 +2,13 @@
  * Agent Timeout — Wraps a process's done promise with SIGTERM → grace → SIGKILL escalation
  *
  * Prevents indefinite hangs when an agent's process dies without cleanly closing stdout.
+ *
+ * Kill semantics: spawner prefers to launch agents under `setsid` so they're
+ * the leader of their own session/process-group. On timeout we try to signal
+ * the whole group (`kill -SIG -<pid>`) so forked children (git, rg, curl,
+ * test runners) die with the parent instead of leaking. If group-kill fails
+ * (no setsid available, or process already gone), we fall back to signaling
+ * the leader PID alone.
  */
 
 export interface TimeoutOptions {
@@ -14,6 +21,25 @@ export interface TimeoutOptions {
 export interface TimedResult {
   exitCode: number;
   timedOut: boolean;
+}
+
+/**
+ * Send a signal to the process group led by `pid`. Requires the process to
+ * have been spawned under `setsid` (so PID == PGID). Returns true on
+ * successful delivery, false on any failure (no-such-group, not-a-leader,
+ * kill binary missing). Callers should fall back to per-PID signalling.
+ */
+function killProcessGroup(pid: number, signal: "TERM" | "KILL"): boolean {
+  try {
+    const out = new Deno.Command("kill", {
+      args: [`-${signal}`, `-${pid}`], // negative pid = kill process group
+      stdout: "null",
+      stderr: "null",
+    }).outputSync();
+    return out.success;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -49,12 +75,15 @@ export async function withTimeout(
       return { exitCode: raceResult.exitCode, timedOut: false };
     }
 
-    // Timeout fired — escalate
+    // Timeout fired — escalate. Try group-kill first so any forked
+    // children (git, rg, test runners) also get the signal.
     console.warn(`[timeout] Process ${process.pid} timed out after ${timeoutMs}ms, sending SIGTERM`);
-    try {
-      process.kill("SIGTERM");
-    } catch {
-      // Process already dead
+    if (!killProcessGroup(process.pid, "TERM")) {
+      try {
+        process.kill("SIGTERM");
+      } catch {
+        // Process already dead
+      }
     }
 
     // Wait for graceful shutdown or force kill
@@ -73,12 +102,14 @@ export async function withTimeout(
         return { exitCode: graceResult.exitCode, timedOut: true };
       }
 
-      // Grace period expired — SIGKILL
+      // Grace period expired — SIGKILL. Same group-kill-first pattern.
       console.warn(`[timeout] Process ${process.pid} did not exit after SIGTERM, sending SIGKILL`);
-      try {
-        process.kill("SIGKILL");
-      } catch {
-        // Process already dead
+      if (!killProcessGroup(process.pid, "KILL")) {
+        try {
+          process.kill("SIGKILL");
+        } catch {
+          // Process already dead
+        }
       }
 
       // SIGKILL closes stdout fd → unblocks pipePromise → done resolves
