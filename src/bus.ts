@@ -9,6 +9,15 @@ import type { AgentSignal } from "./types.ts";
 
 export type BusConsumer = (signal: AgentSignal) => void;
 
+/** Bus persistence status — flips to "offline" when rotation exhausts all fallbacks. */
+export type BusStatus = "online" | "offline";
+
+/**
+ * Status consumer receives transitions between online/offline.
+ * `reason` is populated on offline transitions (short diagnostic string).
+ */
+export type BusStatusConsumer = (status: BusStatus, reason?: string) => void;
+
 /** Default max log file size: 50MB */
 const DEFAULT_MAX_LOG_BYTES = 50 * 1024 * 1024;
 
@@ -42,6 +51,7 @@ export function enqueueBounded<T>(queue: T[], item: T, cap: number): number {
 
 export class SignalBus {
   private consumers: Set<BusConsumer> = new Set();
+  private statusConsumers: Set<BusStatusConsumer> = new Set();
   private logFile: string | null = null;
   private logHandle: Deno.FsFile | null = null;
   private logBytes = 0;
@@ -51,11 +61,54 @@ export class SignalBus {
   private rotating = false;
   private pendingWrites: AgentSignal[] = [];
   private droppedDuringRotation = 0;
+  private _offline = false;
 
   constructor(opts?: BusOptions) {
     this.logFile = opts?.logFile ?? null;
     this.maxLogBytes = opts?.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES;
     this.maxPendingWrites = opts?.maxPendingWrites ?? DEFAULT_MAX_PENDING_WRITES;
+  }
+
+  /**
+   * True when rotation exhausted every fallback and the bus is not persisting
+   * signals. Consumer callbacks still fire, but log writes are being dropped.
+   */
+  get offline(): boolean {
+    return this._offline;
+  }
+
+  /**
+   * Subscribe to bus persistence status changes. Called on every online→offline
+   * and offline→online transition so dashboards/orchestrators can react instead
+   * of silently running half-blind.
+   *
+   * Returns an unsubscribe function.
+   */
+  onStatus(cb: BusStatusConsumer): () => void {
+    this.statusConsumers.add(cb);
+    return () => this.statusConsumers.delete(cb);
+  }
+
+  private notifyStatus(status: BusStatus, reason?: string): void {
+    for (const cb of this.statusConsumers) {
+      try {
+        cb(status, reason);
+      } catch (err) {
+        console.error(`[bus] status consumer error:`, String(err).slice(0, 200));
+      }
+    }
+  }
+
+  private setOffline(reason: string): void {
+    if (this._offline) return;
+    this._offline = true;
+    this.notifyStatus("offline", reason);
+  }
+
+  private setOnline(): void {
+    if (!this._offline) return;
+    this._offline = false;
+    this.notifyStatus("online");
   }
 
   /** Open log file for appending (call once at startup) */
@@ -88,8 +141,16 @@ export class SignalBus {
     return () => this.consumers.delete(consumer);
   }
 
-  /** Emit a signal to all consumers and the log file */
-  async emit(signal: AgentSignal): Promise<void> {
+  /**
+   * Emit a signal to all consumers and the log file.
+   *
+   * Returns `true` when the signal was persisted (or no logFile was configured,
+   * so persistence isn't expected). Returns `false` when the log write was
+   * dropped because the bus is offline — callers that depend on the JSONL log
+   * can use this (or `onStatus`) to decide whether to abort instead of running
+   * half-blind.
+   */
+  async emit(signal: AgentSignal): Promise<boolean> {
     // Notify all consumers — each in its own try/catch so one bad consumer doesn't break others
     for (const consumer of this.consumers) {
       try {
@@ -99,8 +160,15 @@ export class SignalBus {
       }
     }
 
+    // No logging configured → persistence isn't expected, treat as ok.
+    if (!this.logFile) return true;
+
+    // BUS-01: Rotation previously exhausted all fallbacks; log is offline.
+    // Consumers have already fired; the log line is dropped.
+    if (this._offline && !this.rotating) return false;
+
     // Append to log file — with write protection and rotation
-    if (this.logHandle && this.logFile) {
+    if (this.logHandle) {
       // BUS-02: Queue writes while rotating instead of dropping them.
       // Cap the queue so a stalled rotation (slow network FS, fallback loop) can't
       // grow memory linearly with signal rate — drop oldest; report once on flush.
@@ -110,7 +178,7 @@ export class SignalBus {
           signal,
           this.maxPendingWrites,
         );
-        return;
+        return true;
       }
 
       try {
@@ -129,12 +197,18 @@ export class SignalBus {
         if (this.logHandle) {
           await this.logHandle.write(bytes);
           this.logBytes += bytes.byteLength;
+          return true;
         }
+        // Rotation left us offline — drop this write.
+        return false;
       } catch (err) {
         // Log write failed (disk full, permissions, etc.) — don't crash the bus
         console.error(`[bus] log write error:`, String(err).slice(0, 200));
+        return false;
       }
     }
+
+    return false;
   }
 
   /** Rotate the log file — rename current to .old, start fresh */
@@ -164,9 +238,12 @@ export class SignalBus {
       this.logBytes = 0;
 
       console.error(`[bus] log rotated: ${this.logFile} → ${rotatedPath}`);
+      // Recovery path: a prior rotation may have left us offline.
+      this.setOnline();
     } catch (err) {
       // BUS-01: On rotation failure, try harder to recover logging
-      console.error(`[bus] rotation failed:`, String(err).slice(0, 200));
+      const errStr = String(err).slice(0, 200);
+      console.error(`[bus] rotation failed:`, errStr);
 
       // The rename may or may not have happened. Try to open the original path,
       // and if that fails, try a timestamped fallback so we don't lose signals.
@@ -194,6 +271,13 @@ export class SignalBus {
 
       if (!this.logHandle) {
         console.error(`[bus] FATAL: cannot open any log file — signals will not be persisted`);
+        // BUS-01: surface the failure to status consumers so callers can abort
+        // instead of silently losing JSONL-dependent data (dashboards, cost
+        // summaries, `expo watch`).
+        this.setOffline(`rotation failed, all fallbacks exhausted: ${errStr}`);
+      } else {
+        // Fallback succeeded → bus is online (or back online).
+        this.setOnline();
       }
     } finally {
       this.rotating = false;
