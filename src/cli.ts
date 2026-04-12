@@ -600,7 +600,7 @@ async function cmdReview(args: string[]): Promise<void> {
   const spawner = new AgentSpawner(bus, { registry });
   await spawner.init();
 
-  const unguard = costGuard(bus, { perAgentBudget: 1.0, totalBudget: 5.0 });
+  const unguard = costGuard(bus, { perAgentBudget: 1.0, totalBudget: 5.0, spawner });
 
   const wAgent = workAgent ?? "claude";
   const rAgent = reviewAgent ?? "claude";
@@ -727,7 +727,7 @@ async function cmdRalph(args: string[]): Promise<void> {
   const spawner = new AgentSpawner(bus, { registry });
   await spawner.init();
 
-  const unguard = costGuard(bus, { totalBudget: 10.0 });
+  const unguard = costGuard(bus, { totalBudget: 10.0, spawner });
   const unescalate = escalationRouter(bus, {
     failThreshold: 2,
     onEscalate: (_signal, ctx) => {
@@ -1181,7 +1181,7 @@ async function cmdRefine(args: string[]): Promise<void> {
   const spawner = new AgentSpawner(bus, { registry });
   await spawner.init();
 
-  const unguard = costGuard(bus, { perAgentBudget, totalBudget });
+  const unguard = costGuard(bus, { perAgentBudget, totalBudget, spawner });
 
   console.log(`${BOLD}Refine Loop${RESET}`);
   console.log(`  Directory:  ${dir}`);

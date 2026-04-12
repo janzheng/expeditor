@@ -298,7 +298,7 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
   await spawner.init();
 
   const budget = opts.budget ?? 10;
-  const unguard = costGuard(bus, { totalBudget: budget });
+  const unguard = costGuard(bus, { totalBudget: budget, spawner });
 
   // Spawn all agents in parallel
   const agentType = opts.agent;

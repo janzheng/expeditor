@@ -111,15 +111,20 @@ export interface ReviewLoopOptions {
 
 const DEFAULT_REVIEW_PROMPT = `Review the work done by the previous agent. Check for bugs, missing edge cases, and code quality issues. Categorize issues as High, Medium, or Low severity. Be specific about what needs fixing.`;
 
-const DEFAULT_GATE_PROMPT = `Based on the review, respond with exactly DONE or ITERATE on the first line, followed by a brief reason.
-DONE if: the work is complete and no High severity issues remain.
-ITERATE if: there are High severity issues or the work is incomplete.`;
+const DEFAULT_GATE_PROMPT = `Based on the review, respond with exactly one of these lines as the FIRST non-empty line:
+  VERDICT: DONE      (the work is complete and no High severity issues remain)
+  VERDICT: ITERATE   (there are High severity issues or the work is incomplete)
+You may follow the verdict line with a brief reason on subsequent lines.
+A bare "DONE" or "ITERATE" at the start of a line is also accepted.
+Any other format will be treated as a parse failure and halt the loop.`;
 
 export interface ReviewLoopResult {
-  verdict: "DONE" | "ITERATE" | "MAX_ITERATIONS";
+  verdict: "DONE" | "ITERATE" | "MAX_ITERATIONS" | "UNCLEAR";
   iterations: number;
   lastOutput: string;
   totalCostUsd: number;
+  /** Set when verdict === "UNCLEAR": the gate output that failed to parse. */
+  unclearReason?: string;
 }
 
 export async function reviewLoop(
@@ -537,6 +542,24 @@ export interface CostGuardOptions {
   perAgentBudget?: number;
   /** Max total cost in USD */
   totalBudget?: number;
+  /** When provided, overrun triggers actual kill of the offending agent
+   *  (per-agent) or all running agents (total). Without spawner the guard
+   *  is advisory-only (warns to stderr). Always pass the spawner when
+   *  running unattended — warnings alone don't stop the spend. */
+  spawner?: AgentSpawner;
+}
+
+/** Signal emitted on the bus when a budget is exceeded. Consumers
+ *  (orchestrators, CI scripts, monitoring) should watch for this and
+ *  treat it as a terminal condition — distinct from an agent's own
+ *  `failed` signal. */
+export interface BudgetExceededPayload {
+  kind: "per-agent" | "total";
+  agentId?: string; // set for per-agent overruns
+  cost: number; // the cost that triggered
+  limit: number; // the budget that was exceeded
+  total: number; // accumulated cost across all agents
+  killed: boolean; // whether we actually killed; false when spawner wasn't provided
 }
 
 export function costGuard(
@@ -545,20 +568,83 @@ export function costGuard(
 ): () => void {
   const perAgent = new Map<string, number>();
   let total = 0;
+  // Guard against double-fire: once total-exceeded triggers, we kill
+  // every agent and stop checking. Further cost signals from in-flight
+  // processes shouldn't re-trigger the kill cascade.
+  let totalExceededFired = false;
+  const perAgentExceededFired = new Set<string>();
 
-  return bus.subscribe((signal) => {
+  return bus.subscribe(async (signal) => {
     if (signal.type !== "cost") return;
 
     const cost = (signal.payload as Record<string, unknown>).totalCostUsd as number ?? 0;
     perAgent.set(signal.agentId, cost);
     total = Array.from(perAgent.values()).reduce((a, b) => a + b, 0);
 
-    if (opts.perAgentBudget && cost > opts.perAgentBudget) {
-      console.warn(`[cost-guard] ${signal.agentId}: $${cost.toFixed(4)} exceeds per-agent budget $${opts.perAgentBudget}`);
+    // Per-agent overrun: kill just this agent.
+    if (
+      opts.perAgentBudget &&
+      cost > opts.perAgentBudget &&
+      !perAgentExceededFired.has(signal.agentId)
+    ) {
+      perAgentExceededFired.add(signal.agentId);
+      console.warn(
+        `[cost-guard] ${signal.agentId}: $${cost.toFixed(4)} exceeds per-agent budget $${opts.perAgentBudget} — killing`,
+      );
+      let killed = false;
+      if (opts.spawner) {
+        killed = await opts.spawner.killAgent(
+          signal.agentId,
+          `budget exceeded ($${cost.toFixed(4)} > $${opts.perAgentBudget})`,
+        );
+      }
+      await bus.emit({
+        agentId: signal.agentId,
+        sessionId: signal.sessionId,
+        timestamp: Date.now(),
+        type: "failed",
+        payload: {
+          error: `budget_exceeded: per-agent $${cost.toFixed(4)} > $${opts.perAgentBudget}`,
+          budgetExceeded: {
+            kind: "per-agent",
+            agentId: signal.agentId,
+            cost,
+            limit: opts.perAgentBudget,
+            total,
+            killed,
+          } satisfies BudgetExceededPayload,
+        },
+      }).catch(() => {}); // best-effort — process is being killed
     }
 
-    if (opts.totalBudget && total > opts.totalBudget) {
-      console.warn(`[cost-guard] Total $${total.toFixed(4)} exceeds budget $${opts.totalBudget}`);
+    // Total overrun: kill everything. Fatal for the run.
+    if (opts.totalBudget && total > opts.totalBudget && !totalExceededFired) {
+      totalExceededFired = true;
+      console.warn(
+        `[cost-guard] Total $${total.toFixed(4)} exceeds budget $${opts.totalBudget} — killing all running agents`,
+      );
+      let killedCount = 0;
+      if (opts.spawner) {
+        killedCount = await opts.spawner.killAllRunning(
+          `total budget exceeded ($${total.toFixed(4)} > $${opts.totalBudget})`,
+        );
+      }
+      await bus.emit({
+        agentId: signal.agentId,
+        sessionId: signal.sessionId,
+        timestamp: Date.now(),
+        type: "failed",
+        payload: {
+          error: `budget_exceeded: total $${total.toFixed(4)} > $${opts.totalBudget}`,
+          budgetExceeded: {
+            kind: "total",
+            cost,
+            limit: opts.totalBudget,
+            total,
+            killed: killedCount > 0,
+          } satisfies BudgetExceededPayload,
+        },
+      }).catch(() => {});
     }
   });
 }

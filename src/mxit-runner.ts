@@ -161,7 +161,7 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
   const spawner = new AgentSpawner(bus, { registry });
   await spawner.init();
 
-  const unguard = costGuard(bus, { totalBudget: budget });
+  const unguard = costGuard(bus, { totalBudget: budget, spawner });
 
   const results: TaskResult[] = [];
   let totalCost = 0;
