@@ -27,6 +27,23 @@ export interface ClaudeAdapterOptions {
 }
 
 /**
+ * Build a permission-ledger key for a Bash denial.
+ *
+ * Wraps the raw command verbatim as `Bash(<full-command>)` so the ledger
+ * keys on the exact invocation. Previously we split on whitespace and used
+ * only argv[0] (`Bash(<argv0>:*)`), which collided for structurally
+ * different commands — e.g. `git push --force`, `git status`, and
+ * `GIT_TRACE=1 git log` all mapped to `Bash(git:*)`, and quoted paths
+ * like `"my tool"` collapsed to `Bash("my:*)`.
+ *
+ * The raw command is stored verbatim (no quoting/escaping); callers that
+ * display or re-emit the pattern must treat it as opaque.
+ */
+export function buildBashDenialPattern(command: string): string {
+  return `Bash(${command})`;
+}
+
+/**
  * Parse a single stream-json line into zero or more AgentSignals.
  * One input line can produce multiple signals (e.g., an assistant message
  * with both text and tool_use content blocks).
@@ -279,9 +296,8 @@ function handleResult(
       const input = obj.tool_input as Record<string, unknown>;
       if (toolName === "Bash" && input?.command) {
         const fullCommand = String(input.command);
-        const cmd = fullCommand.split(/\s+/)[0];
         return {
-          pattern: `Bash(${cmd}:*)`,
+          pattern: buildBashDenialPattern(fullCommand),
           toolName,
           command: fullCommand,
           description: input.description as string | undefined,
