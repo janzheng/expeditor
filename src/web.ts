@@ -385,12 +385,24 @@ async function handleListRuns(logsDir: string): Promise<Response> {
 }
 
 async function handleGetRun(logsDir: string, filename: string): Promise<Response> {
-  // Sanitize filename
-  if (filename.includes("..") || filename.includes("/")) {
+  // Sanitize filename — reject obvious traversal first as a cheap guard.
+  if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
     return new Response("Bad request", { status: 400 });
   }
   try {
-    const content = await Deno.readTextFile(`${logsDir}/${filename}`);
+    // Canonicalize both paths so a symlink inside .expo/logs can't smuggle
+    // a read of /etc/passwd or other files outside logsDir. Without this,
+    // an agent with write access to .expo/logs could create a symlink
+    // whose name looks like a .jsonl log and the dashboard would serve
+    // whatever it pointed at.
+    const canonicalLogsDir = await Deno.realPath(logsDir);
+    const requested = await Deno.realPath(`${logsDir}/${filename}`);
+    const prefix = canonicalLogsDir.endsWith("/") ? canonicalLogsDir : canonicalLogsDir + "/";
+    if (requested !== canonicalLogsDir && !requested.startsWith(prefix)) {
+      return new Response("Bad request", { status: 400 });
+    }
+
+    const content = await Deno.readTextFile(requested);
     const events = content.split("\n")
       .filter((l) => l.trim())
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
