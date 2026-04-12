@@ -10,6 +10,7 @@
  * On 3 consecutive discards in a lineage, branches to the best under-explored variant.
  */
 
+import { globToRegExp } from "https://deno.land/std/path/glob_to_regexp.ts";
 import { SignalBus } from "./bus.ts";
 import { AgentSpawner, type AgentType } from "./spawner.ts";
 import { spawnAndWait } from "./orchestrator.ts";
@@ -61,6 +62,18 @@ export interface RefineOptions {
   allowAgentGates?: boolean;
   /** Timeout (seconds) for each gate command. Default: 60. */
   gateTimeout?: number;
+  /** Glob patterns (relative to `dir`) defining which paths the agent is
+   *  allowed to modify. If set, any iteration that touches a file outside
+   *  these patterns is force-discarded before the rubric judgment even
+   *  runs. This is a HARD constraint, unlike rubric prose — rubric text
+   *  is a suggestion to an intelligent reader; a scope pattern is a gate.
+   *
+   *  Example: `["src/workflow.ts", "tests/**"]` — agent may only touch
+   *  those paths. Modifying src/cli.ts auto-discards.
+   *
+   *  Matched against paths returned by `git status --porcelain` during
+   *  the agent run. Glob semantics match Deno std's `globToRegExp`. */
+  scope?: string[];
 }
 
 export interface RefineResult {
@@ -271,6 +284,39 @@ export async function refine(
     }
 
     if (verdict.action === "keep") {
+      // Scope check — if the caller set --scope patterns, any agent-touched
+      // path outside the allowed globs force-discards this iteration BEFORE
+      // we spend time running gates or snapshotting. Hard constraint, unlike
+      // rubric prose.
+      if (opts.scope && opts.scope.length > 0 && agentTouchedPaths && agentTouchedPaths.length > 0) {
+        const violations = findScopeViolations(agentTouchedPaths, opts.scope);
+        if (violations.length > 0) {
+          gateFailures++;
+          console.log(
+            `[refine] scope violation — agent touched ${violations.length} file(s) outside --scope: ${violations.slice(0, 3).join(", ")}${violations.length > 3 ? ` (+${violations.length - 3} more)` : ""}`,
+          );
+          await emitRefineProgress(
+            bus,
+            agentName,
+            iterations,
+            `scope_violation: ${violations.length} path(s) outside allowed globs — forcing discard`,
+            { scopeViolations: violations },
+          );
+
+          // Restore + record the discard + feed into branch-on-streak.
+          const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
+            change: verdict.change,
+            summary: `scope_violation: ${violations.slice(0, 5).join(", ")}`.slice(0, 300),
+          });
+          if (outcome === "exhausted") {
+            variants = await list(dir);
+            await updateRefineMd(bus, spawner, dir, variants, opts);
+            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+          }
+          continue;
+        }
+      }
+
       // Run inherited gates BEFORE snapshotting. Any failure converts
       // this keep into a forced discard — the invariant ratchet wins
       // over the LLM's aesthetic judgment.
@@ -1080,6 +1126,25 @@ export async function removeRefineGate(
     console.error(`[refine] Failed to remove gate: ${String(err).slice(0, 200)}`);
     Deno.exit(1);
   }
+}
+
+/** Return the subset of `paths` that don't match any of the allowed
+ *  glob patterns. Non-empty return = scope violation — caller should
+ *  discard the iteration. Globs are compiled once per call; for the
+ *  scale of a refine loop (tens of files, a handful of patterns) the
+ *  allocation cost is negligible. */
+export function findScopeViolations(paths: string[], scope: string[]): string[] {
+  if (scope.length === 0) return [];
+  const regexes = scope.map((g) =>
+    globToRegExp(g, { extended: true, globstar: true, caseInsensitive: false })
+  );
+  const violations: string[] = [];
+  for (const p of paths) {
+    if (!regexes.some((rx) => rx.test(p))) {
+      violations.push(p);
+    }
+  }
+  return violations;
 }
 
 /** Run `git status --porcelain` and return the set of dirty/untracked

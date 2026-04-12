@@ -51,6 +51,46 @@ expo status
 
 ## Features
 
+### Audit → fix pipeline
+
+The high-leverage workflow: have an agent find bugs, then have agents fix them with gate-validated autonomy.
+
+```bash
+# 1. Audit — an Opus agent reads your code and writes ranked findings.
+#    No code changes. $1-2 for a typical project.
+expo audit . --focus all --cap 20
+
+# 2. (optional) Triage — a second agent reads the audit and flags false
+#    positives. Cheap insurance: $0.50-1.
+expo audit . --triage
+
+# 3. Review .brief/audit-YYYY-MM-DD.md (and -triage.md). Pick findings.
+
+# 4. Fix — expo refine runs N iterations, each: one focused change,
+#    run gates, keep if tests pass else discard. Scope-enforced so
+#    the agent can't stray.
+expo refine . \
+  --rubric "Fix audit-flagged silent-failure bugs from .brief/audit-*.md. Each fix must add a regression test." \
+  --gate "typecheck=deno check src/" \
+  --gate "tests=deno test" \
+  --scope "src/workflow.ts" --scope "src/bus.ts" --scope "tests/**" \
+  --per-agent-budget 1.00 --total-budget 5.00 \
+  --max 5
+```
+
+**What each piece does for you:**
+
+- **`audit`**: structured findings with severity, file:line, what-goes-wrong, trigger, suggested-fix. Cap-bounded, focus-bounded. Writes to `.brief/` by default.
+- **`--triage`**: second-agent pass that filters KEEP / REJECT / NEEDS-CONTEXT. Run this before acting on audits you didn't personally verify.
+- **`refine --scope GLOB`**: hard constraint. Agent modifies a file outside the globs → iteration auto-discarded before gates even run. Not rubric prose.
+- **`refine --gate NAME=CMD`**: inherited invariant checks. Any non-zero exit forces discard. Same pattern across iterations so progress only goes one direction.
+- **`refine --per-agent-budget / --total-budget`**: real enforcement (kills agents on overrun, emits structured failure). Not advisory.
+- **`refine --allow-agent-gates`**: agent may propose *new* gates when it fixes a fragile behavior. Opt-in; locks behavior in across descendants (gate ratchet).
+
+**Why it works**: the agent's aesthetic judgment is unreliable; your test suite is not. Gates collapse "did the agent do the right thing?" into "do the tests still pass?". The ratchet means the set of things that must remain true only grows.
+
+**When it doesn't work**: thin test coverage. If your gates can't distinguish a good change from a subtle regression, this whole loop is just expensive coin-flipping. Invest in the test suite first.
+
 ### Web dashboard
 
 Live agent monitoring in the browser:
@@ -208,8 +248,10 @@ Each iteration: agent makes ONE focused change → keeps or discards → snapsho
 | `expo ralph "<work>" "<gate>"` | Sequential task progression |
 | `expo workflow <file.md>` | Run a markdown workflow |
 | `expo mxit <TASKS.md>` | Execute tasks from a task file |
-| `expo refine <dir>` | Archive-based refinement loop |
-| `expo serve` | Web dashboard |
+| `expo refine <dir>` | Archive-based refinement loop (gates + scope + budget) |
+| `expo audit <dir>` | Findings-only audit; writes `.brief/audit-*.md` |
+| `expo audit <dir> --triage` | Audit + second-agent triage pass |
+| `expo serve` | Web dashboard (auth-gated, 127.0.0.1 default) |
 | `expo permissions` | Manage permission ledger |
 | `expo watch <file.jsonl>` | Replay a bus log |
 

@@ -1121,7 +1121,7 @@ async function cmdRefine(args: string[]): Promise<void> {
   if (!dir) {
     console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N]");
     console.error("                       [--gate \"name=command\"] [--allow-agent-gates] [--gate-timeout N]");
-    console.error("                       [--per-agent-budget USD] [--total-budget USD]");
+    console.error("                       [--per-agent-budget USD] [--total-budget USD] [--scope GLOB]");
     console.error("");
     console.error("Quick commands:");
     console.error("  expo refine <dir> --tree     Show archive tree");
@@ -1150,6 +1150,10 @@ async function cmdRefine(args: string[]): Promise<void> {
   // Expose as flags so long unattended sessions don't require editing source.
   let perAgentBudget = 2.0;
   let totalBudget = 20.0;
+  // Scope enforcement — hard constraint on which files the agent may
+  // touch. Repeatable; one glob per flag. Enforced before gate run /
+  // snapshot, so violations force-discard early and cheaply.
+  const scope: string[] = [];
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
@@ -1175,6 +1179,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--gate-timeout" && args[i + 1]) gateTimeout = parseIntArg("--gate-timeout", args[++i]);
     else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
+    else if (args[i] === "--scope" && args[i + 1]) scope.push(args[++i]);
   }
 
   // Load rubric from file if specified
@@ -1216,6 +1221,10 @@ async function cmdRefine(args: string[]): Promise<void> {
     }
   }
   if (allowAgentGates) console.log(`  Agent gates: enabled (agent may propose new gates)`);
+  if (scope.length > 0) {
+    console.log(`  Scope:      ${scope.length} glob(s) — agent may only modify these paths`);
+    for (const g of scope) console.log(`              • ${g}`);
+  }
   console.log(`  Log:        ${logFile}`);
   console.log("");
 
@@ -1234,6 +1243,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     gates: gates.length > 0 ? gates : undefined,
     allowAgentGates,
     gateTimeout,
+    scope: scope.length > 0 ? scope : undefined,
   });
 
   unguard();
@@ -1338,6 +1348,223 @@ async function cmdRefineGate(args: string[]): Promise<void> {
   console.error(`${RED}Unknown gate subcommand: ${sub}${RESET}`);
   console.error("Expected: list | add | remove");
   Deno.exit(1);
+}
+
+// --- Audit (findings-only agent pass) ---
+
+/** Build the audit prompt. Kept as a function so `--focus` can inject
+ *  category-specific framing without rewriting the whole skeleton. */
+function buildAuditPrompt(opts: { dir: string; focus: string; outputPath: string; cap: number }): string {
+  const { dir, focus, outputPath, cap } = opts;
+
+  const focusSection = focus === "all"
+    ? `Produce findings in three categories, ranked P1/P2/P3:
+
+1. SPEED — hot paths, wasted work, redundant reads, O(N^2) scans of small data structures, expensive ops in inner loops, repeated subprocess spawns, missed caching.
+2. SECURITY — shell injection surface, path traversal, unsanitized subprocess args, secrets written to logs, permission-bypass patterns, gaps in sandbox/ledger enforcement, process-group kill gaps, HTTP endpoints without auth, SSRF.
+3. AGENTIC UX — friction for an LLM agent trying to drive this CLI: unstructured output, swallowed errors, fragile parsing, missing exit codes, behavior that requires a human to interpret, cases where the CLI says it did something but didn't, cases where the agent can't tell what state the system is in without scraping logs.`
+    : focus === "security"
+      ? `Focus on SECURITY: shell injection surface, path traversal, unsanitized subprocess args, secrets written to logs, permission-bypass patterns, gaps in sandbox/ledger enforcement, process-group kill gaps, HTTP endpoints without auth, SSRF, TOCTOU races, symlink tricks.`
+      : focus === "speed"
+        ? `Focus on SPEED: hot paths, wasted work, redundant reads, O(N^2) scans of small data structures, expensive ops in inner loops, repeated subprocess spawns, missed caching, blocking I/O on the main loop.`
+        : focus === "agentic-ux"
+          ? `Focus on AGENTIC UX: friction for an LLM agent driving this CLI — unstructured output, swallowed errors, fragile parsing, missing exit codes, silent success when actually empty, silent failure that looks like success, behavior that needs a human to interpret, state the agent can't query without scraping logs.`
+          : `Focus on: ${focus}`;
+
+  return `Audit the project at ${dir} for real problems an LLM agent driving it unattended would hit. Read as if you were going to orchestrate it autonomously — find what would frustrate, mislead, or silently corrupt work.
+
+Read: src/**/*.ts (or equivalent source), README.md, and any TASKS*.md / *.md docs for context.
+
+${focusSection}
+
+For each finding emit this exact markdown shape:
+
+### <short name>
+- **Severity:** P1 | P2 | P3
+- **Category:** speed | security | agentic-ux
+- **File:** path:LINE
+- **What goes wrong:** one sentence
+- **Trigger:** one sentence
+- **Suggested fix:** one or two sentences
+
+Cap total findings at ${cap}. Prioritize ruthlessly — prefer 10 real bugs to ${cap} theoretical ones. Do NOT include style, test suggestions, "consider adding a comment" items, or hypothetical edge cases no one would hit.
+
+Write the full report to ${outputPath}. Do NOT edit any other files. Do NOT make code changes. Findings only.
+
+At the end of your response, include VERDICT: DONE if you finished, VERDICT: PARTIAL if you only produced a partial report (ran out of context, hit a tool denial, etc.).`;
+}
+
+async function cmdAudit(args: string[]): Promise<void> {
+  const dir = args[0];
+  if (!dir || dir === "--help") {
+    console.error("Usage: expo audit <dir> [--output PATH] [--focus all|security|speed|agentic-ux] [--cap N]");
+    console.error("                       [--model MODEL] [--timeout N] [--triage]");
+    console.error("");
+    console.error("Spawns an audit agent that reads the project and writes findings to a markdown file.");
+    console.error("Default output: <dir>/.brief/audit-<ISO-date>.md");
+    console.error("");
+    console.error("Examples:");
+    console.error("  expo audit .                               # general audit, all categories");
+    console.error("  expo audit ./src --focus security          # security-only sweep");
+    console.error("  expo audit . --triage                      # also run a triage agent to filter false positives");
+    console.error("  expo audit . --cap 30 --model opus         # bigger sweep on Opus");
+    Deno.exit(1);
+  }
+
+  // Parse flags. Keep schema flat and forgiving — audit is the entry
+  // point a first-time user hits, friction here loses adopters.
+  let output: string | undefined;
+  let focus = "all";
+  let cap = 20;
+  let model: string | undefined;
+  let timeout = 900;
+  let triage = false;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--output" && args[i + 1]) output = args[++i];
+    else if (args[i] === "--focus" && args[i + 1]) focus = args[++i];
+    else if (args[i] === "--cap" && args[i + 1]) {
+      const v = Number(args[++i]);
+      if (Number.isFinite(v) && v > 0) cap = Math.floor(v);
+      else { console.error(`${RED}--cap must be a positive integer${RESET}`); Deno.exit(2); }
+    }
+    else if (args[i] === "--model" && args[i + 1]) model = args[++i];
+    else if (args[i] === "--timeout" && args[i + 1]) {
+      const v = Number(args[++i]);
+      if (Number.isFinite(v) && v > 0) timeout = Math.floor(v);
+      else { console.error(`${RED}--timeout must be a positive integer (seconds)${RESET}`); Deno.exit(2); }
+    }
+    else if (args[i] === "--triage") triage = true;
+  }
+
+  if (!output) {
+    // Default path: <dir>/.brief/audit-<yyyy-mm-dd>.md — dated so multiple
+    // audits don't stomp each other. Agent creates .brief/ if missing.
+    const date = new Date().toISOString().slice(0, 10);
+    output = `${dir.replace(/\/$/, "")}/.brief/audit-${date}.md`;
+  }
+
+  const prompt = buildAuditPrompt({ dir, focus, outputPath: output, cap });
+
+  console.log(`${BOLD}Expo Audit${RESET}`);
+  console.log(`  Directory: ${dir}`);
+  console.log(`  Focus:     ${focus}`);
+  console.log(`  Cap:       ${cap} findings`);
+  console.log(`  Output:    ${output}`);
+  if (triage) console.log(`  Triage:    yes (second-agent pass to filter false positives)`);
+  console.log("");
+
+  // Ensure the .brief folder exists so the agent's Write doesn't 404 on
+  // the parent. (Some agents don't create intermediate dirs.)
+  try {
+    const briefDir = output.slice(0, output.lastIndexOf("/"));
+    if (briefDir) await Deno.mkdir(briefDir, { recursive: true });
+  } catch { /* ignore, agent may still handle it */ }
+
+  // Delegate to `expo spawn` so we get all the signal bus / cost tracking
+  // / sandbox infrastructure for free. No point reinventing.
+  const spawnArgs = [
+    "spawn", prompt,
+    "--name", `audit-${focus}`,
+    "--sandbox", "developer",
+    "--no-worktree",
+    "--timeout", String(timeout),
+  ];
+  if (model) spawnArgs.push("--model", model);
+
+  const proc = new Deno.Command("deno", {
+    args: ["run", "--allow-all", new URL("./cli.ts", import.meta.url).pathname, ...spawnArgs],
+    cwd: dir,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn();
+  const status = await proc.status;
+  if (!status.success) {
+    console.error(`${RED}Audit agent failed (exit ${status.code})${RESET}`);
+    Deno.exit(status.code ?? 1);
+  }
+
+  // Check that the output file actually landed. Audit agents sometimes
+  // exit 0 without writing the expected file — the same silent-empty
+  // failure mode we fixed for workflow. Explicit check here.
+  try {
+    await Deno.stat(output);
+  } catch {
+    console.error(`${RED}Audit completed but ${output} was not written${RESET}`);
+    Deno.exit(1);
+  }
+
+  console.log(`\n${GREEN}✓ Audit complete${RESET} — findings at ${output}`);
+
+  if (triage) {
+    await cmdAuditTriage(dir, output, { model, timeout });
+  }
+}
+
+/** Second-agent pass that reads the audit and flags likely false-positives.
+ *  Cheap ($1-2) insurance against acting on a bad finding. */
+async function cmdAuditTriage(
+  dir: string,
+  auditPath: string,
+  opts: { model?: string; timeout: number },
+): Promise<void> {
+  const triageOutput = auditPath.replace(/\.md$/, "-triage.md");
+  const prompt = `You are triaging an audit report produced by another agent. Your job: identify which findings are false positives, duplicates, out-of-scope, or too vague to act on.
+
+Read the audit report at ${auditPath}. Also read relevant source files in ${dir} to verify the claims against actual code.
+
+For each finding, output one of:
+- KEEP: finding is real, actionable, and well-scoped. Include the original finding name and your one-line confirmation.
+- REJECT: finding is wrong, out-of-date, already-fixed, or based on a misread. Include the original name and ONE sentence on why.
+- NEEDS-CONTEXT: finding might be real but needs clarification before acting. Include the original name and what's ambiguous.
+
+Be ruthless. A KEEP:REJECT ratio of 60:40 is normal; anything much higher on KEEP means you're not scrutinizing hard enough. Verifying with real code beats speculating.
+
+Write your triage output to ${triageOutput} in this format:
+
+## KEEP (ready to act on)
+- **<finding name>** — <one-line confirmation with file:line evidence>
+
+## REJECT (do not fix)
+- **<finding name>** — <reason>
+
+## NEEDS-CONTEXT (ask a human first)
+- **<finding name>** — <what's ambiguous>
+
+At the end include VERDICT: DONE.`;
+
+  console.log(`\n${BOLD}Triage pass${RESET}`);
+  console.log(`  Input:  ${auditPath}`);
+  console.log(`  Output: ${triageOutput}`);
+
+  const spawnArgs = [
+    "spawn", prompt,
+    "--name", "audit-triage",
+    "--sandbox", "developer",
+    "--no-worktree",
+    "--timeout", String(opts.timeout),
+  ];
+  if (opts.model) spawnArgs.push("--model", opts.model);
+
+  const proc = new Deno.Command("deno", {
+    args: ["run", "--allow-all", new URL("./cli.ts", import.meta.url).pathname, ...spawnArgs],
+    cwd: dir,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).spawn();
+  const status = await proc.status;
+  if (!status.success) {
+    console.error(`${RED}Triage failed (exit ${status.code}) — original audit remains at ${auditPath}${RESET}`);
+    return;
+  }
+
+  try {
+    await Deno.stat(triageOutput);
+    console.log(`${GREEN}✓ Triage complete${RESET} — review ${triageOutput} before acting on findings`);
+  } catch {
+    console.error(`${YELLOW}Triage completed but ${triageOutput} was not written${RESET}`);
+  }
 }
 
 // --- Init scaffolding ---
@@ -1473,6 +1700,10 @@ switch (command) {
     await cmdRefine(args);
     break;
 
+  case "audit":
+    await cmdAudit(args);
+    break;
+
   case "serve": {
     let port = 3000;
     let logFile: string | undefined;
@@ -1539,6 +1770,8 @@ ${BOLD}Commands:${RESET}
   refine <dir> gate list    Show gates inherited by each variant
   refine <dir> gate add     Attach a named gate to a variant (inherits to descendants)
   refine <dir> gate remove  Remove a named gate from a variant
+  audit <dir> [flags]       Findings-only audit — agent reads source, writes .brief/audit-*.md
+  audit <dir> --triage      Also run a triage agent to flag false positives
   serve [--port N]          Web dashboard — live agent cards in browser
   permissions               List permission ledger entries
   permissions approve <p>   Approve a permission pattern for future runs
