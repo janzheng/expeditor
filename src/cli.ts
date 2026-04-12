@@ -785,7 +785,7 @@ async function cmdWorkflow(args: string[]): Promise<void> {
     else if (args[i] === "--budget" && args[i + 1]) budget = parseFloat(args[++i]);
     else if (args[i] === "--dry-run") dryRun = true;
     else if (args[i] === "--sandbox" && args[i + 1]) sandboxOverride = args[++i];
-    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseIntArg("--timeout", args[++i]);
   }
 
   // Parse the workflow for display
@@ -899,8 +899,8 @@ async function cmdMxit(args: string[]): Promise<void> {
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
-    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
-    else if (args[i] === "--max" && args[i + 1]) maxTasks = parseInt(args[++i]);
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseIntArg("--timeout", args[++i]);
+    else if (args[i] === "--max" && args[i + 1]) maxTasks = parseIntArg("--max", args[++i], { min: 1 });
     else if (args[i] === "--parallel") parallel = true;
     else if (args[i] === "--budget" && args[i + 1]) budget = parseFloat(args[++i]);
     else if (args[i] === "--sandbox" && args[i + 1]) sandbox = args[++i];
@@ -1138,14 +1138,14 @@ async function cmdRefine(args: string[]): Promise<void> {
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
     else if (args[i] === "--rubric-file" && args[i + 1]) rubricFile = args[++i];
-    else if (args[i] === "--max" && args[i + 1]) maxIterations = parseInt(args[++i]);
+    else if (args[i] === "--max" && args[i + 1]) maxIterations = parseIntArg("--max", args[++i], { min: 1 });
     else if (args[i] === "--continue") { /* accepted for back-compat, no-op — refine resumes by default */ }
     else if (args[i] === "--branch-from" && args[i + 1]) branchFrom = args[++i];
     else if (args[i] === "--interactive") interactive = true;
     else if (args[i] === "--name" && args[i + 1]) name = args[++i];
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
     else if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
-    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseIntArg("--timeout", args[++i]);
     else if (args[i] === "--sandbox" && args[i + 1]) sandbox = args[++i];
     else if (args[i] === "--gate" && args[i + 1]) {
       const parsed = parseGateFlag(args[++i]);
@@ -1156,7 +1156,7 @@ async function cmdRefine(args: string[]): Promise<void> {
       }
     }
     else if (args[i] === "--allow-agent-gates") allowAgentGates = true;
-    else if (args[i] === "--gate-timeout" && args[i + 1]) gateTimeout = parseInt(args[++i]);
+    else if (args[i] === "--gate-timeout" && args[i + 1]) gateTimeout = parseIntArg("--gate-timeout", args[++i]);
     else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
   }
@@ -1456,7 +1456,7 @@ switch (command) {
     let authToken: string | undefined;
     let noAuth = false;
     for (let i = 0; i < args.length; i++) {
-      if (args[i] === "--port" && args[i + 1]) port = parseInt(args[++i]);
+      if (args[i] === "--port" && args[i + 1]) port = parseIntArg("--port", args[++i], { min: 1 });
       else if (args[i] === "--log" && args[i + 1]) logFile = args[++i];
       else if (args[i] === "--host" && args[i + 1]) host = args[++i];
       else if (args[i] === "--token" && args[i + 1]) authToken = args[++i];

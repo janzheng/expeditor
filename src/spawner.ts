@@ -157,6 +157,63 @@ export class AgentSpawner {
   /** Per-process cache — computed once, reused for every spawn. */
   private static _setsidAvailable: boolean | undefined;
 
+  /** Send SIGTERM to a running agent (and its process group if `setsid`
+   *  was used at spawn). Looks up the pid from the registry. Idempotent;
+   *  safe to call on already-dead agents.
+   *
+   *  Returns true if a signal was sent (live process found), false
+   *  otherwise. Does NOT wait for exit — callers should listen for the
+   *  `done`/`failed` signal on the bus if they need confirmation. */
+  async killAgent(agentId: string, reason?: string): Promise<boolean> {
+    const entry = this.registry.get(agentId);
+    if (!entry || !entry.pid || entry.status !== "running") return false;
+
+    const pid = entry.pid;
+    // Group-kill first (reaches forked children when spawned under setsid),
+    // fall back to leader-only kill. Mirrors the pattern in timeout.ts.
+    const groupKilled = AgentSpawner.tryKillProcessGroup(pid, "TERM");
+    if (!groupKilled) {
+      try {
+        Deno.kill(pid, "SIGTERM");
+      } catch {
+        return false; // process already gone
+      }
+    }
+    if (reason) {
+      console.warn(`[spawner] killed ${agentId} (pid ${pid}): ${reason}`);
+    }
+    return true;
+  }
+
+  /** Kill every agent currently marked as `running`. Used by cost-guard on
+   *  total-budget overrun — there's no way to tell which agent's cost put
+   *  us over, and in fan-out patterns (race, workflow) all siblings share
+   *  the budget. Safer to stop everything than let the overrun compound. */
+  async killAllRunning(reason?: string): Promise<number> {
+    const running = this.registry.getByStatus("running");
+    let killed = 0;
+    for (const entry of running) {
+      if (await this.killAgent(entry.agentId, reason)) killed++;
+    }
+    return killed;
+  }
+
+  /** Private helper used by killAgent. Not shared with timeout.ts's
+   *  identical function because the cross-module coupling isn't worth
+   *  the few lines saved — both are leaf-level OS calls. */
+  private static tryKillProcessGroup(pid: number, signal: "TERM" | "KILL"): boolean {
+    try {
+      const out = new Deno.Command("kill", {
+        args: [`-${signal}`, `-${pid}`],
+        stdout: "null",
+        stderr: "null",
+      }).outputSync();
+      return out.success;
+    } catch {
+      return false;
+    }
+  }
+
   /** Check whether `setsid` is on PATH. Used by spawn() to decide whether
    *  to launch agents as their own session leader (so `kill -<pid>` on
    *  timeout reaches forked grandchildren). Cached after first lookup. */
