@@ -12,10 +12,32 @@ export type BusConsumer = (signal: AgentSignal) => void;
 /** Default max log file size: 50MB */
 const DEFAULT_MAX_LOG_BYTES = 50 * 1024 * 1024;
 
+/** Default cap on in-memory queue of writes deferred during rotation */
+const DEFAULT_MAX_PENDING_WRITES = 10_000;
+
 export interface BusOptions {
   logFile?: string;
   /** Max log file size in bytes before rotation (default: 50MB) */
   maxLogBytes?: number;
+  /** Max deferred writes queued during rotation; oldest dropped when full (default: 10000) */
+  maxPendingWrites?: number;
+}
+
+/**
+ * Push `item` onto `queue`, dropping oldest entries if the queue would exceed `cap`.
+ * Returns the number of entries dropped (0 when no cap pressure).
+ *
+ * Exported so the audit-scoped invariant (bus pendingWrites never grows unbounded
+ * during a stalled rotation) can be regression-tested without spinning up a real bus.
+ */
+export function enqueueBounded<T>(queue: T[], item: T, cap: number): number {
+  queue.push(item);
+  let dropped = 0;
+  while (queue.length > cap) {
+    queue.shift();
+    dropped++;
+  }
+  return dropped;
 }
 
 export class SignalBus {
@@ -24,13 +46,16 @@ export class SignalBus {
   private logHandle: Deno.FsFile | null = null;
   private logBytes = 0;
   private maxLogBytes: number;
+  private maxPendingWrites: number;
   private encoder = new TextEncoder();
   private rotating = false;
   private pendingWrites: AgentSignal[] = [];
+  private droppedDuringRotation = 0;
 
   constructor(opts?: BusOptions) {
     this.logFile = opts?.logFile ?? null;
     this.maxLogBytes = opts?.maxLogBytes ?? DEFAULT_MAX_LOG_BYTES;
+    this.maxPendingWrites = opts?.maxPendingWrites ?? DEFAULT_MAX_PENDING_WRITES;
   }
 
   /** Open log file for appending (call once at startup) */
@@ -76,9 +101,15 @@ export class SignalBus {
 
     // Append to log file — with write protection and rotation
     if (this.logHandle && this.logFile) {
-      // BUS-02: Queue writes while rotating instead of dropping them
+      // BUS-02: Queue writes while rotating instead of dropping them.
+      // Cap the queue so a stalled rotation (slow network FS, fallback loop) can't
+      // grow memory linearly with signal rate — drop oldest; report once on flush.
       if (this.rotating) {
-        this.pendingWrites.push(signal);
+        this.droppedDuringRotation += enqueueBounded(
+          this.pendingWrites,
+          signal,
+          this.maxPendingWrites,
+        );
         return;
       }
 
@@ -179,6 +210,13 @@ export class SignalBus {
             this.logBytes += bytes.byteLength;
           } catch { /* best effort */ }
         }
+      }
+      // BUS-02: One consolidated warning if the cap dropped signals during this rotation.
+      if (this.droppedDuringRotation > 0) {
+        console.error(
+          `[bus] dropped ${this.droppedDuringRotation} pending signal(s) during rotation (cap: ${this.maxPendingWrites})`,
+        );
+        this.droppedDuringRotation = 0;
       }
     }
   }
