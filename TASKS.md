@@ -123,6 +123,40 @@ Research context (in `/Users/janzheng/Desktop/Projects/__resources/github-repos/
 - [?] Dashboard gate UI — list gates per variant, show which inherited, manual add/remove from browser
 - [?] Timeout per-gate (currently one global `--gate-timeout` for all gates)
 
+## Agentic UX + Audit #agentic-ux
+
+Lens: **expo as a tool LLM agents reach for, not just humans at a terminal.** Compiled 2026-04-12 after the gate-ratchet self-playtest.
+
+- [*] Full wishlist with rationale + rough design sketches: `TASKS-AGENTIC-UX.md`
+- [*] Findings from automated audit will land at `.brief/agentic-audit.md` (generated, not hand-written)
+
+### Audit pass
+
+- [@audit-agent] Run speed / security / agentic-UX audit on expo source `-> .brief/agentic-audit.md` #audit #agentic-ux
+  - [*] Launched via `expo spawn` on 2026-04-12; findings written to `.brief/agentic-audit.md`
+  - [*] Prompt focuses on: speed bottlenecks, security concerns, agentic-UX friction when an LLM orchestrates expo
+  - [*] After completion, triage findings into TASKS-AGENTIC-UX.md and/or TASKS-AUDIT.md
+
+### Priority 1 — do first (unblock unattended runs)
+
+- [ ] `gate check` subcommand — verify gates pass before firing a long refine loop `-> TASKS-AGENTIC-UX.md` #agentic-ux #gates
+- [ ] Verify cost-guard enforces (not just logs) + distinct exit code `-> TASKS-AGENTIC-UX.md` #security #budget
+- [ ] Per-run wall-clock timeout (`--run-timeout`) `-> TASKS-AGENTIC-UX.md` #safety #resilience
+- [ ] Verdict parser — fenced `<verdict>` block grammar `-> TASKS-AGENTIC-UX.md` #parsing
+
+### Priority 2 — agentic UX wins
+
+- [ ] `--json` flag on `expo refine` result `-> TASKS-AGENTIC-UX.md` #agentic-ux #output
+- [ ] Pass gate-failure context into next iteration's prompt `-> TASKS-AGENTIC-UX.md` #feedback #gates
+- [ ] Token-efficient formats (TOON / compact) for gate list, --tree, --status `-> TASKS-AGENTIC-UX.md` #agentic-ux #toon
+- [ ] `expo refine <dir> heuristics` — expose REFINE.md to orchestrators `-> TASKS-AGENTIC-UX.md` #agentic-ux
+
+### Priority 3 — bigger lifts
+
+- [ ] `--auto` zero-config discovery mode (evo-style `/discover`) `-> TASKS-AGENTIC-UX.md` #agentic-ux #discover
+- [ ] Agent-in-loop approval (non-TTY) — callback URL / named pipe `-> TASKS-AGENTIC-UX.md` #agentic-ux
+- [ ] Resumability after crash / kill — persist per-iteration state, smoke-test recovery `-> TASKS-AGENTIC-UX.md` #resilience
+
 ## Brigade Learnings — Ported Fixes & Patterns
 
 Sourced from `/Users/janzheng/Desktop/Projects/_deno/apps/brigade/.brief/`. Brigade hit these bugs in production; expo has the same code paths.
