@@ -261,3 +261,59 @@ export class PermissionLedger {
     return { allowAdded, denyAdded, skipped };
   }
 }
+
+// --- Process-wide singleton + serialized mutation chain ---
+//
+// The web dashboard previously did `new PermissionLedger() → load → mutate →
+// save` for every approve/reject request. Two concurrent requests would each
+// load the same on-disk state, each mutate their own copy, then each save —
+// the later save clobbers whichever mutation landed first. That's a
+// read-modify-write race on security-critical state.
+//
+// The fix is to keep one ledger per process and serialize mutations through
+// a single FIFO chain. Each link re-loads before mutating so cross-process
+// writers (CLI, other expo instances) can't be clobbered either.
+
+let _sharedLedger: PermissionLedger | null = null;
+let _sharedMutationChain: Promise<unknown> = Promise.resolve();
+
+/** Return the process-wide ledger, constructing it lazily on first call.
+ *  Subsequent calls return the same instance; `opts` is only honored on the
+ *  first call (it's a no-op after that — mirrors how a real singleton
+ *  behaves). Call `resetPermissionLedgerSingleton()` to drop the reference
+ *  (tests only). */
+export function getPermissionLedger(opts?: { filePath?: string; cwd?: string }): PermissionLedger {
+  if (!_sharedLedger) {
+    _sharedLedger = new PermissionLedger(opts);
+  }
+  return _sharedLedger;
+}
+
+/** Serialize a load → mutate → save cycle against every other in-flight
+ *  mutation. Guarantees no lost writes even when many handlers call
+ *  concurrently. The callback may be sync or async; its return value is
+ *  passed through to the caller after the save completes. */
+export async function mutatePermissionLedger<T>(
+  fn: (ledger: PermissionLedger) => T | Promise<T>,
+  opts?: { filePath?: string; cwd?: string },
+): Promise<T> {
+  const ledger = getPermissionLedger(opts);
+  const next = _sharedMutationChain.then(async () => {
+    await ledger.load();
+    const result = await fn(ledger);
+    await ledger.save();
+    return result;
+  });
+  // Swallow errors on the chain itself so one failed mutation doesn't
+  // poison every subsequent one. The caller still sees the original
+  // rejection through `next`.
+  _sharedMutationChain = next.catch(() => {});
+  return next;
+}
+
+/** Reset module-level state. Intended for tests that need a clean slate
+ *  between cases; production code should not call this. */
+export function resetPermissionLedgerSingleton(): void {
+  _sharedLedger = null;
+  _sharedMutationChain = Promise.resolve();
+}

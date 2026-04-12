@@ -414,29 +414,23 @@ async function handleGetRun(logsDir: string, filename: string): Promise<Response
 }
 
 async function handleGetPermissions(): Promise<Response> {
-  const { PermissionLedger } = await import("./permission-ledger.ts");
-  const ledger = new PermissionLedger();
+  const { getPermissionLedger } = await import("./permission-ledger.ts");
+  const ledger = getPermissionLedger();
   await ledger.load();
   return new Response(JSON.stringify(ledger.getAll()), { headers: JSON_HEADERS });
 }
 
 async function handleApprovePermission(pattern: string): Promise<Response> {
   if (!pattern) return new Response(JSON.stringify({ error: "pattern required" }), { status: 400, headers: JSON_HEADERS });
-  const { PermissionLedger } = await import("./permission-ledger.ts");
-  const ledger = new PermissionLedger();
-  await ledger.load();
-  ledger.approve(pattern);
-  await ledger.save();
+  const { mutatePermissionLedger } = await import("./permission-ledger.ts");
+  await mutatePermissionLedger((ledger) => { ledger.approve(pattern); });
   return new Response(JSON.stringify({ ok: true, pattern, status: "approved" }), { headers: JSON_HEADERS });
 }
 
 async function handleRejectPermission(pattern: string): Promise<Response> {
   if (!pattern) return new Response(JSON.stringify({ error: "pattern required" }), { status: 400, headers: JSON_HEADERS });
-  const { PermissionLedger } = await import("./permission-ledger.ts");
-  const ledger = new PermissionLedger();
-  await ledger.load();
-  ledger.reject(pattern);
-  await ledger.save();
+  const { mutatePermissionLedger } = await import("./permission-ledger.ts");
+  await mutatePermissionLedger((ledger) => { ledger.reject(pattern); });
   return new Response(JSON.stringify({ ok: true, pattern, status: "rejected" }), { headers: JSON_HEADERS });
 }
 
