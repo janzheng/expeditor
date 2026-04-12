@@ -1086,8 +1086,9 @@ async function cmdRefine(args: string[]): Promise<void> {
   }
 
   if (!dir) {
-    console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--continue] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N]");
+    console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N]");
     console.error("                       [--gate \"name=command\"] [--allow-agent-gates] [--gate-timeout N]");
+    console.error("                       [--per-agent-budget USD] [--total-budget USD]");
     console.error("");
     console.error("Quick commands:");
     console.error("  expo refine <dir> --tree     Show archive tree");
@@ -1102,7 +1103,6 @@ async function cmdRefine(args: string[]): Promise<void> {
   let rubric: string | undefined;
   let rubricFile: string | undefined;
   let maxIterations = 10;
-  let continueSession = false;
   let branchFrom: string | undefined;
   let interactive = false;
   let name = "refine";
@@ -1113,12 +1113,16 @@ async function cmdRefine(args: string[]): Promise<void> {
   const gates: Array<{ name: string; command: string; rationale?: string }> = [];
   let allowAgentGates = false;
   let gateTimeout: number | undefined;
+  // Budget guards — previously hard-coded at $2/agent and $20 total.
+  // Expose as flags so long unattended sessions don't require editing source.
+  let perAgentBudget = 2.0;
+  let totalBudget = 20.0;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
     else if (args[i] === "--rubric-file" && args[i + 1]) rubricFile = args[++i];
     else if (args[i] === "--max" && args[i + 1]) maxIterations = parseInt(args[++i]);
-    else if (args[i] === "--continue") continueSession = true;
+    else if (args[i] === "--continue") { /* accepted for back-compat, no-op — refine resumes by default */ }
     else if (args[i] === "--branch-from" && args[i + 1]) branchFrom = args[++i];
     else if (args[i] === "--interactive") interactive = true;
     else if (args[i] === "--name" && args[i + 1]) name = args[++i];
@@ -1136,6 +1140,8 @@ async function cmdRefine(args: string[]): Promise<void> {
     }
     else if (args[i] === "--allow-agent-gates") allowAgentGates = true;
     else if (args[i] === "--gate-timeout" && args[i + 1]) gateTimeout = parseInt(args[++i]);
+    else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
+    else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
   }
 
   // Load rubric from file if specified
@@ -1158,15 +1164,17 @@ async function cmdRefine(args: string[]): Promise<void> {
   const spawner = new AgentSpawner(bus, { registry });
   await spawner.init();
 
-  const unguard = costGuard(bus, { perAgentBudget: 2.0, totalBudget: 20.0 });
+  const unguard = costGuard(bus, { perAgentBudget, totalBudget });
 
   console.log(`${BOLD}Refine Loop${RESET}`);
   console.log(`  Directory:  ${dir}`);
   console.log(`  Rubric:     ${rubric ? rubric.slice(0, 60) + (rubric.length > 60 ? "..." : "") : "(none — agent will decide)"}`);
   console.log(`  Max iter:   ${maxIterations}`);
   console.log(`  Agent:      ${agent}${model ? `:${model}` : ""}`);
-  if (continueSession) console.log(`  Mode:       continue previous session`);
   if (branchFrom) console.log(`  Branch from: ${branchFrom}`);
+  if (perAgentBudget !== 2.0 || totalBudget !== 20.0) {
+    console.log(`  Budget:     $${perAgentBudget.toFixed(2)}/agent, $${totalBudget.toFixed(2)} total`);
+  }
   if (interactive) console.log(`  Interactive: yes`);
   if (gates.length > 0) {
     console.log(`  Gates:      ${gates.length} seeded on baseline`);
@@ -1183,7 +1191,6 @@ async function cmdRefine(args: string[]): Promise<void> {
     dir,
     rubric,
     maxIterations,
-    continue: continueSession,
     branchFrom,
     interactive,
     name,

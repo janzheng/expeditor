@@ -36,8 +36,9 @@ export interface RefineOptions {
   rubric?: string;
   /** Max iterations (default: 10) */
   maxIterations?: number;
-  /** Continue a previous session */
-  continue?: boolean;
+  // (removed: `continue?: boolean` — threaded through but never read;
+  //  refine already resumes correctly when `.refine/manifest.json`
+  //  exists, because the loop only snapshots baseline on empty archive.)
   /** Branch from a specific variant ID */
   branchFrom?: string;
   /** Interactive mode — human approves between iterations */
@@ -421,29 +422,69 @@ interface GateRunResult {
   failed?: GateFailure;
 }
 
+/** Escape a string for safe interpolation into a `sh -c` command. We
+ *  single-quote, and close/reopen the quote around any embedded single
+ *  quote. The result is always safe to splice into double-quoted
+ *  positions in a shell command, as long as the placeholder itself is
+ *  already inside a quoted context in the user's command. */
+function shellEscape(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 /** Run inherited gates one at a time against the current state of `dir`.
  *  Short-circuits on the first failure — there's no value in running the
- *  rest if one already says the candidate is unacceptable. */
+ *  rest if one already says the candidate is unacceptable.
+ *
+ *  On timeout, sends SIGKILL to the whole process group so long-running
+ *  grandchildren (e.g. `deno test` spawned inside `sh -c`) also die. We
+ *  achieve this via a `setsid` prefix so the shell becomes a session
+ *  leader with its own PGID. */
 async function runInheritedGates(
   gates: Gate[],
   opts: { dir: string; variantId: string; timeoutMs: number },
 ): Promise<GateRunResult> {
   for (const gate of gates) {
+    // Placeholders are shell-escaped before substitution so that dirs
+    // containing spaces or shell metacharacters don't cause command
+    // corruption or injection.
     const cmd = gate.command
-      .replaceAll("{dir}", opts.dir)
-      .replaceAll("{variantId}", opts.variantId);
+      .replaceAll("{dir}", shellEscape(opts.dir))
+      .replaceAll("{variantId}", shellEscape(opts.variantId));
 
-    const proc = new Deno.Command("sh", {
-      args: ["-c", cmd],
-      cwd: opts.dir,
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
+    // setsid puts the shell in a new session (and new process group),
+    // so we can kill the whole tree on timeout. Falls back to plain
+    // `sh` if setsid isn't available.
+    const hasSetsid = await commandExists("setsid");
+    const proc = hasSetsid
+      ? new Deno.Command("setsid", {
+          args: ["sh", "-c", cmd],
+          cwd: opts.dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn()
+      : new Deno.Command("sh", {
+          args: ["-c", cmd],
+          cwd: opts.dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn();
 
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try { proc.kill("SIGKILL"); } catch { /* already exited */ }
+      if (hasSetsid) {
+        // Negative pid = kill the process group. Requires setsid to have
+        // made the shell a session leader.
+        try {
+          new Deno.Command("kill", {
+            args: ["-KILL", `-${proc.pid}`],
+            stdout: "null",
+            stderr: "null",
+          }).outputSync();
+        } catch { /* group already gone */ }
+      } else {
+        try { proc.kill("SIGKILL"); } catch { /* already exited */ }
+      }
     }, opts.timeoutMs);
 
     let output;
@@ -466,6 +507,25 @@ async function runInheritedGates(
     }
   }
   return { ok: true };
+}
+
+/** Cheap check for whether a command is on PATH. Cached per-process. */
+const _cmdExistsCache = new Map<string, boolean>();
+async function commandExists(name: string): Promise<boolean> {
+  if (_cmdExistsCache.has(name)) return _cmdExistsCache.get(name)!;
+  try {
+    const out = await new Deno.Command("sh", {
+      args: ["-c", `command -v ${name}`],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    const found = out.success;
+    _cmdExistsCache.set(name, found);
+    return found;
+  } catch {
+    _cmdExistsCache.set(name, false);
+    return false;
+  }
 }
 
 // ── Prompt building ────────────────────────────────────────────

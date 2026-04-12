@@ -8,6 +8,7 @@
  *   - cost guard: kill agents over budget
  */
 
+import { join } from "https://deno.land/std/path/mod.ts";
 import type { AgentSignal } from "./types.ts";
 import { SignalBus } from "./bus.ts";
 import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
@@ -24,6 +25,57 @@ async function loadSnapshot() {
     console.warn(`[snapshot] @snapshot/core not available: ${String(err).slice(0, 100)}. Continuing without snapshots.`);
     return null;
   }
+}
+
+/** Entries we never copy between worktrees and the project dir — git
+ *  metadata, build artefacts, expo/refine state that would clobber the
+ *  caller's setup. Matches the excludes used inside @snapshot/core. */
+const SYNC_EXCLUDES = new Set([
+  ".git", ".claude", ".refine", ".expo", ".DS_Store",
+  "node_modules", "dist", "build", "target", ".next", ".nuxt",
+  ".cache", "__pycache__", ".venv", "venv", ".svelte-kit", ".turbo",
+]);
+
+function isExcluded(name: string): boolean {
+  return SYNC_EXCLUDES.has(name) || name.endsWith(".pyc");
+}
+
+/** Recursively copy `src` into `dest`, skipping excluded names. Creates
+ *  dest directories as needed. Used by race() to copy a winner's worktree
+ *  state into the caller's snapshotDir before snapshotting — otherwise
+ *  snapshot() would just capture the unchanged pre-race state. */
+async function copyDirRecursive(src: string, dest: string): Promise<void> {
+  for await (const entry of Deno.readDir(src)) {
+    if (isExcluded(entry.name)) continue;
+    const srcPath = join(src, entry.name);
+    const destPath = join(dest, entry.name);
+    if (entry.isDirectory) {
+      await Deno.mkdir(destPath, { recursive: true }).catch(() => {});
+      await copyDirRecursive(srcPath, destPath);
+    } else if (entry.isSymlink) {
+      // Preserve symlinks rather than dereferencing them.
+      const target = await Deno.readLink(srcPath);
+      await Deno.remove(destPath).catch(() => {});
+      await Deno.symlink(target, destPath);
+    } else {
+      await Deno.copyFile(srcPath, destPath);
+    }
+  }
+}
+
+/** Replace the contents of `dest` with the contents of `src`, respecting
+ *  excludes. First deletes non-excluded entries in dest, then copies from
+ *  src. Used when race picks a winner whose changes live in an isolated
+ *  worktree — we need those changes in the caller's project dir before
+ *  snapshotting, or the "winner snapshot" is a lie. */
+async function syncWorktreeIntoDir(src: string, dest: string): Promise<void> {
+  // 1. Remove non-excluded entries from dest
+  for await (const entry of Deno.readDir(dest)) {
+    if (isExcluded(entry.name)) continue;
+    await Deno.remove(join(dest, entry.name), { recursive: true }).catch(() => {});
+  }
+  // 2. Copy non-excluded entries from src into dest
+  await copyDirRecursive(src, dest);
 }
 
 // --- Review Loop ---
@@ -271,12 +323,27 @@ export async function race(
   }
 
   if (successIndices.length === 1) {
+    // Auto-winner. Before returning, materialize the winner's worktree
+    // into snapshotDir so the caller sees the winner's actual changes —
+    // otherwise the project dir stays at its pre-race state and any
+    // snapshot we'd take would capture the wrong files.
+    const winnerIdx = successIndices[0];
+    if (snap && opts.snapshotDir) {
+      const winnerWt = spawner.getRegistry().get(agents[winnerIdx].agentId)?.worktreePath;
+      if (winnerWt) {
+        await syncWorktreeIntoDir(winnerWt, opts.snapshotDir);
+        await snap.snapshot(opts.snapshotDir, {
+          change: `race-winner-branch-${winnerIdx + 1}`,
+          summary: `Auto-winner (only branch ${winnerIdx + 1} succeeded)`,
+        });
+      }
+    }
     return {
-      winner: successIndices[0],
-      winnerOutput: outputs[successIndices[0]],
+      winner: winnerIdx,
+      winnerOutput: outputs[winnerIdx],
       allOutputs: outputs,
       totalCostUsd: totalCost,
-      judgeReasoning: `Only branch ${successIndices[0] + 1} succeeded`,
+      judgeReasoning: `Only branch ${winnerIdx + 1} succeeded`,
     };
   }
 
@@ -302,9 +369,19 @@ Respond with PICK <number> (1-indexed) on the first line, followed by your reaso
   const winnerNum = parsePickVerdict(judgeResult.output, n);
   const winner = winnerNum >= 0 ? winnerNum : successIndices[0];
 
-  // Snapshot winner's state
+  // Snapshot winner's state. Winner branches run in isolated worktrees,
+  // so we must copy the winner's files into snapshotDir BEFORE snapshot —
+  // otherwise snapshotDir is still at the pre-race baseline and we'd
+  // capture the wrong files.
   if (snap && opts.snapshotDir) {
-    await snap.snapshot(opts.snapshotDir, { change: `race-winner-branch-${winner + 1}`, summary: judgeResult.output.slice(0, 200) });
+    const winnerWt = spawner.getRegistry().get(agents[winner].agentId)?.worktreePath;
+    if (winnerWt) {
+      await syncWorktreeIntoDir(winnerWt, opts.snapshotDir);
+    }
+    await snap.snapshot(opts.snapshotDir, {
+      change: `race-winner-branch-${winner + 1}`,
+      summary: judgeResult.output.slice(0, 200),
+    });
   }
 
   return {
