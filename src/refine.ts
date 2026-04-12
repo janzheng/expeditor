@@ -205,19 +205,10 @@ export async function refine(
     const verdict = parseVerdict(result.output);
 
     // Emit refine_verdict signal for dashboard tracking
-    await bus.emit({
-      agentId: agentName,
-      sessionId: crypto.randomUUID(),
-      timestamp: Date.now(),
-      type: "progress",
-      payload: {
-        kind: "status",
-        message: `refine_verdict: ${verdict.action} — ${verdict.change}`,
-        refineVerdict: verdict.action,
-        refineChange: verdict.change,
-        refineSummary: verdict.summary,
-        iteration: iterations,
-      },
+    await emitRefineProgress(bus, agentName, iterations, `refine_verdict: ${verdict.action} — ${verdict.change}`, {
+      refineVerdict: verdict.action,
+      refineChange: verdict.change,
+      refineSummary: verdict.summary,
     });
 
     // Interactive mode: prompt human for approval
@@ -272,53 +263,30 @@ export async function refine(
 
       if (!gateResult.ok) {
         gateFailures++;
-        await bus.emit({
-          agentId: agentName,
-          sessionId: crypto.randomUUID(),
-          timestamp: Date.now(),
-          type: "progress",
-          payload: {
-            kind: "status",
-            message: `gate_failed: ${gateResult.failed!.name} (exit ${gateResult.failed!.exitCode}) — forcing discard`,
+        await emitRefineProgress(
+          bus,
+          agentName,
+          iterations,
+          `gate_failed: ${gateResult.failed!.name} (exit ${gateResult.failed!.exitCode}) — forcing discard`,
+          {
             gateFailed: gateResult.failed!.name,
             gateExitCode: gateResult.failed!.exitCode,
-            iteration: iterations,
           },
-        });
+        );
         console.log(
           `[refine] gate '${gateResult.failed!.name}' failed (exit ${gateResult.failed!.exitCode}) — discarding iteration ${iterations}`,
         );
 
-        // Restore to the last kept state (in case the agent left the dir dirty),
-        // then log a discard with the gate-failure reason.
-        const lastKeptId = getLastKeptId(variants);
-        if (lastKeptId) {
-          await restore(dir, lastKeptId);
-        }
-        await discard(dir, {
+        // Restore to last kept, discard with gate-failure reason, and
+        // potentially branch if the discard streak hit the limit.
+        const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
           change: verdict.change,
           summary: `gate_failed:${gateResult.failed!.name} — ${verdict.summary}`.slice(0, 300),
         });
-
-        const parentKey = lastKeptId || "root";
-        const count = (discardCounts.get(parentKey) ?? 0) + 1;
-        discardCounts.set(parentKey, count);
-
-        // Fall through to the same 3-consecutive-discards branching logic
-        // used by the rubric-discard path.
-        if (count >= MAX_CONSECUTIVE_DISCARDS) {
+        if (outcome === "exhausted") {
           variants = await list(dir);
-          const branchTarget = findBestUnderExplored(variants, parentKey);
-          if (branchTarget) {
-            console.log(
-              `[refine] ${count} consecutive discards on ${parentKey} — branching to ${branchTarget.id} (${branchTarget.change})`,
-            );
-            await restore(dir, branchTarget.id);
-            discardCounts.set(parentKey, 0);
-          } else {
-            await updateRefineMd(bus, spawner, dir, variants, opts);
-            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
-          }
+          await updateRefineMd(bus, spawner, dir, variants, opts);
+          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
         }
 
         continue;
@@ -336,68 +304,23 @@ export async function refine(
       // Only honoured when allowAgentGates is true; we already filtered
       // in parseVerdict to an empty array otherwise.
       if (opts.allowAgentGates && verdict.gateProposals.length > 0) {
-        for (const proposal of verdict.gateProposals) {
-          try {
-            await addGate(dir, finalVariantId, proposal);
-            gatesProposed++;
-            await bus.emit({
-              agentId: agentName,
-              sessionId: crypto.randomUUID(),
-              timestamp: Date.now(),
-              type: "progress",
-              payload: {
-                kind: "status",
-                message: `gate_added: ${proposal.name} on ${finalVariantId}`,
-                gateAdded: proposal.name,
-                gateCommand: proposal.command,
-                iteration: iterations,
-              },
-            });
-            console.log(
-              `[refine] agent added gate '${proposal.name}' on ${finalVariantId}: ${proposal.command.slice(0, 80)}`,
-            );
-          } catch (err) {
-            console.error(
-              `[refine] failed to add gate '${proposal.name}': ${String(err).slice(0, 200)}`,
-            );
-          }
-        }
+        gatesProposed += await attachProposedGates(bus, dir, finalVariantId, verdict.gateProposals, {
+          agentName,
+          iteration: iterations,
+        });
       }
 
       // Reset consecutive discard count for this lineage
       discardCounts.set(finalVariantId, 0);
     } else {
-      // Discard: restore to last kept state and log the failure
-      const lastKeptId = getLastKeptId(variants);
-      if (lastKeptId) {
-        await restore(dir, lastKeptId);
-      }
-      await discard(dir, {
+      const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
         change: verdict.change,
         summary: verdict.summary,
       });
-
-      // Track consecutive discards for this parent lineage
-      const parentKey = lastKeptId || "root";
-      const count = (discardCounts.get(parentKey) ?? 0) + 1;
-      discardCounts.set(parentKey, count);
-
-      // f/g. On 3 consecutive discards, branch to best under-explored variant
-      if (count >= MAX_CONSECUTIVE_DISCARDS) {
+      if (outcome === "exhausted") {
         variants = await list(dir);
-        const branchTarget = findBestUnderExplored(variants, parentKey);
-
-        if (branchTarget) {
-          console.log(
-            `[refine] ${count} consecutive discards on ${parentKey} — branching to ${branchTarget.id} (${branchTarget.change})`,
-          );
-          await restore(dir, branchTarget.id);
-          discardCounts.set(parentKey, 0); // Reset count for the old parent
-        } else {
-          // No under-explored variants — all branches exhausted
-          await updateRefineMd(bus, spawner, dir, variants, opts);
-          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
-        }
+        await updateRefineMd(bus, spawner, dir, variants, opts);
+        return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
       }
     }
   }
@@ -407,6 +330,60 @@ export async function refine(
   finalVariantId = getLastKeptId(variants) ?? "000";
   await updateRefineMd(bus, spawner, dir, variants, opts);
   return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+}
+
+/** Emit a status-kind progress signal with refine-loop context. Collapses
+ *  the repeated agentId/sessionId/timestamp/type boilerplate so call sites
+ *  only carry what's actually unique to the event. */
+async function emitRefineProgress(
+  bus: SignalBus,
+  agentName: string,
+  iteration: number,
+  message: string,
+  extras: Record<string, unknown> = {},
+): Promise<void> {
+  await bus.emit({
+    agentId: agentName,
+    sessionId: crypto.randomUUID(),
+    timestamp: Date.now(),
+    type: "progress",
+    payload: { kind: "status", message, iteration, ...extras },
+  });
+}
+
+/** Attach agent-proposed gates to a newly-kept variant. Emits a progress
+ *  signal and logs per successful attach; failures are logged and skipped
+ *  so one bad proposal doesn't abort the others. Returns the number of
+ *  gates actually attached. */
+async function attachProposedGates(
+  bus: SignalBus,
+  dir: string,
+  variantId: string,
+  proposals: GateProposal[],
+  ctx: { agentName: string; iteration: number },
+): Promise<number> {
+  let added = 0;
+  for (const proposal of proposals) {
+    try {
+      await addGate(dir, variantId, proposal);
+      added++;
+      await emitRefineProgress(
+        bus,
+        ctx.agentName,
+        ctx.iteration,
+        `gate_added: ${proposal.name} on ${variantId}`,
+        { gateAdded: proposal.name, gateCommand: proposal.command },
+      );
+      console.log(
+        `[refine] agent added gate '${proposal.name}' on ${variantId}: ${proposal.command.slice(0, 80)}`,
+      );
+    } catch (err) {
+      console.error(
+        `[refine] failed to add gate '${proposal.name}': ${String(err).slice(0, 200)}`,
+      );
+    }
+  }
+  return added;
 }
 
 // ── Gate runner ────────────────────────────────────────────────
@@ -758,6 +735,44 @@ function extractFirstMeaningfulLine(output: string): string {
 function getLastKeptId(variants: Variant[]): string | null {
   const kept = variants.filter((v) => v.status !== "discarded");
   return kept.at(-1)?.id ?? null;
+}
+
+/**
+ * Restore to the last kept state, log a discard, bump the consecutive-discard
+ * counter for that parent lineage, and — if the streak hit the limit — either
+ * branch to the best under-explored variant or signal exhaustion.
+ *
+ * Returns "exhausted" when the caller should break out of the refine loop;
+ * "continue" when the loop should proceed to the next iteration.
+ */
+async function recordDiscardAndMaybeBranch(
+  dir: string,
+  variants: Variant[],
+  discardCounts: Map<string, number>,
+  entry: { change: string; summary: string },
+): Promise<"continue" | "exhausted"> {
+  const lastKeptId = getLastKeptId(variants);
+  if (lastKeptId) {
+    await restore(dir, lastKeptId);
+  }
+  await discard(dir, entry);
+
+  const parentKey = lastKeptId || "root";
+  const count = (discardCounts.get(parentKey) ?? 0) + 1;
+  discardCounts.set(parentKey, count);
+
+  if (count < MAX_CONSECUTIVE_DISCARDS) return "continue";
+
+  const fresh = await list(dir);
+  const branchTarget = findBestUnderExplored(fresh, parentKey);
+  if (!branchTarget) return "exhausted";
+
+  console.log(
+    `[refine] ${count} consecutive discards on ${parentKey} — branching to ${branchTarget.id} (${branchTarget.change})`,
+  );
+  await restore(dir, branchTarget.id);
+  discardCounts.set(parentKey, 0);
+  return "continue";
 }
 
 /**

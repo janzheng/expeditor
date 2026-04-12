@@ -11,3 +11,4 @@ tests/phase1-2/results/
 
 # Deno cache
 .deno/
+.refine/
