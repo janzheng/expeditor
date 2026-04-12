@@ -12,3 +12,9 @@ tests/phase1-2/results/
 # Deno cache
 .deno/
 .refine/
+
+# OS / editor junk — previously accidentally staged by refine's git add -A
+.DS_Store
+**/.DS_Store
+# MCP auto-approve config — generated per-dev-machine, not committed
+mcp-auto-approve.json
