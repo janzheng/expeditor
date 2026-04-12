@@ -47,6 +47,38 @@ export interface SandboxConfig {
  * Claude Code's hardcoded safety layer (Layer 1) still blocks
  * truly destructive operations regardless of what we allow here.
  */
+/**
+ * Strict hostname regex for allowedDomains entries.
+ *
+ * Matches RFC-1123-ish labels separated by dots, case-insensitive, with no
+ * leading/trailing hyphens. Crucially it rejects ANY shell-meaningful
+ * character — quotes, backticks, `$`, `\`, whitespace, `;`, `|`, etc. — so
+ * entries interpolated into a generated bash array can't break out of the
+ * double-quoted context and inject commands.
+ */
+const HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/;
+
+/** True iff `d` is a valid hostname safe to interpolate into a shell double-quoted string. */
+export function isValidAllowedDomain(d: unknown): d is string {
+  return typeof d === "string" && d.length > 0 && d.length <= 253 && HOSTNAME_RE.test(d);
+}
+
+/**
+ * Validate an allowedDomains list and return the offending entries.
+ * Throws an Error listing every invalid entry if any fail — callers should
+ * surface this to the user rather than emit an unsafe hook.
+ */
+export function assertValidAllowedDomains(domains: readonly string[]): void {
+  const invalid = domains.filter((d) => !isValidAllowedDomain(d));
+  if (invalid.length > 0) {
+    const quoted = invalid.map((d) => JSON.stringify(d)).join(", ");
+    throw new Error(
+      `Invalid allowedDomains entries: ${quoted}. ` +
+      `Each entry must be a valid hostname (letters, digits, dots, hyphens; no shell metacharacters).`,
+    );
+  }
+}
+
 export const SANDBOX_PRESETS: Record<string, SandboxConfig> = {
   /**
    * Auto-approve everything. The "stop asking me" mode.
@@ -288,6 +320,7 @@ export class AgentSpawner {
 
   /** Generate a shell script that blocks network access to non-allowed domains */
   private generateDomainFilterHook(allowedDomains: string[]): string {
+    assertValidAllowedDomains(allowedDomains);
     const domainList = allowedDomains.map((d) => `"${d}"`).join(" ");
     // The hook receives tool input via $TOOL_INPUT env var (JSON)
     // For Bash: check if command contains curl/wget with a URL not matching allowed domains
