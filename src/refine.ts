@@ -187,7 +187,15 @@ export async function refine(
       allowAgentGates: opts.allowAgentGates ?? false,
     });
 
-    // b. Spawn agent
+    // b. Snapshot of working-tree "dirty" paths BEFORE agent spawn.
+    //    Used after the agent returns to compute which paths the agent
+    //    actually touched, so snapshot() stages only those instead of
+    //    sweeping up concurrent uncommitted work via `git add -A`.
+    //    Best-effort — any failure (not a git repo, etc.) just skips the
+    //    scoping and we fall back to the old -A behaviour.
+    const preAgentDirty = await listDirtyPaths(dir);
+
+    // c. Spawn agent
     const agentName = `${prefix}-iter-${iterations}`;
     const result = await spawnAndWait(bus, spawner, {
       prompt,
@@ -201,7 +209,16 @@ export async function refine(
     });
     totalCost += result.cost;
 
-    // c. Parse verdict
+    // d. Compute agent-scoped paths by diffing post-agent dirty set
+    //    against pre-agent dirty set. Any path newly dirty (or still
+    //    dirty with changed content, which this simple check doesn't
+    //    detect — acceptable edge case for now) is the agent's work.
+    const postAgentDirty = await listDirtyPaths(dir);
+    const agentTouchedPaths = preAgentDirty && postAgentDirty
+      ? [...postAgentDirty].filter((p) => !preAgentDirty.has(p))
+      : undefined;
+
+    // e. Parse verdict
     const verdict = parseVerdict(result.output);
 
     // Emit refine_verdict signal for dashboard tracking
@@ -242,6 +259,7 @@ export async function refine(
       await snapshot(dir, {
         change: verdict.change || "Converged",
         summary: verdict.summary || "Agent declared convergence",
+        addPaths: agentTouchedPaths,
       });
       variants = await list(dir);
       finalVariantId = getLastKeptId(variants) ?? "000";
@@ -292,10 +310,14 @@ export async function refine(
         continue;
       }
 
-      // Snapshot the kept state
+      // Snapshot the kept state. Pass the agent's touched-paths so the
+      // commit scope stays clean — any work a concurrent writer did
+      // during the agent's execution stays in the working tree and is
+      // NOT swept into the refine/NNN commit.
       await snapshot(dir, {
         change: verdict.change,
         summary: verdict.summary,
+        addPaths: agentTouchedPaths,
       });
       variants = await list(dir);
       finalVariantId = getLastKeptId(variants) ?? "000";
@@ -1057,5 +1079,36 @@ export async function removeRefineGate(
   } catch (err) {
     console.error(`[refine] Failed to remove gate: ${String(err).slice(0, 200)}`);
     Deno.exit(1);
+  }
+}
+
+/** Run `git status --porcelain` and return the set of dirty/untracked
+ *  paths, relative to `dir`. Returns null when the command fails (not a
+ *  git repo, git missing) so callers can fall back to unscoped staging.
+ *
+ *  Porcelain format: `XY<space><path>` where XY are two status chars.
+ *  Rename lines also include ` -> <newpath>`; we strip that and keep
+ *  only the rename destination since that's what the agent produced. */
+async function listDirtyPaths(dir: string): Promise<Set<string> | null> {
+  try {
+    const proc = await new Deno.Command("git", {
+      args: ["status", "--porcelain"],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (!proc.success) return null;
+    const out = new TextDecoder().decode(proc.stdout);
+    const paths = new Set<string>();
+    for (const line of out.split("\n")) {
+      if (line.length < 4) continue; // empty or too short to be XY<sp>path
+      const rest = line.slice(3); // drop the 3-char status prefix
+      // Handle rename arrows: `old -> new`; keep the new path
+      const arrowIdx = rest.indexOf(" -> ");
+      paths.add(arrowIdx >= 0 ? rest.slice(arrowIdx + 4) : rest);
+    }
+    return paths;
+  } catch {
+    return null;
   }
 }
