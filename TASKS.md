@@ -140,23 +140,22 @@ Lens: **expo as a tool LLM agents reach for, not just humans at a terminal.** Co
 
 Audit-driven P1s (see `.brief/agentic-audit.md`):
 
-- [ ] `expo serve` has unauthenticated POST /api/spawn binding 0.0.0.0 `-> .brief/agentic-audit.md` #security #serve
-  - [*] Browser tabs or LAN peers can launch arbitrary expo commands. Needs bind to 127.0.0.1 + bearer token on mutating routes.
-- [ ] `workflow` reports success when agent wrote nothing `-> .brief/agentic-audit.md` #workflow #silent-failure
-  - [*] Duplicate of A017 in old TASKS-AUDIT.md, still open. Needs "empty" status + structured reason in result JSON.
-- [!] [in-progress: porting runInheritedGates pattern to timeout.ts] `withTimeout` kills only leader PID, not process group `-> .brief/agentic-audit.md` #timeout #resource-leak
-  - [*] Same bug I just fixed for gates in refine.ts. timeout.ts is used by every spawn path (spawn/race/review/mxit/refine). Fix = setsid + kill -SIG -pgid, pattern already exists in runInheritedGates.
+- [x] [fixed: src/web.ts + cli.ts — 127.0.0.1 default bind, random bearer token on mutating routes, constant-time compare, --host/--token/--no-auth flags. Verified end-to-end] `expo serve` has unauthenticated POST /api/spawn binding 0.0.0.0 `-> .brief/agentic-audit.md` #security #serve
+- [x] [fixed by expo refine iter-004: src/workflow.ts now distinguishes "empty" status (exit 0, no output file) from real success, attaches structured reason, skips synthesis when all agents empty] `workflow` reports success when agent wrote nothing `-> .brief/agentic-audit.md` #workflow #silent-failure
+- [x] [fixed: src/spawner.ts wraps agent launch with setsid (cached check); src/timeout.ts uses kill -SIG -pgid with per-pid fallback. Same pattern as runInheritedGates] `withTimeout` kills only leader PID, not process group `-> .brief/agentic-audit.md` #timeout #resource-leak
 
 Audit-driven + wishlist P1s:
 
-- [ ] Verify cost-guard enforces (not just logs) + distinct exit code `-> .brief/agentic-audit.md` #security #budget
-  - [*] Confirmed in audit — currently only `console.warn`s on overrun. Self-playtest showed iter-3 completed after the "exceeds budget" warning.
+- [x] [fixed: src/orchestrator.ts costGuard now kills per-agent on overrun or all-running on total, emits structured BudgetExceededPayload; all 4 call sites updated to pass spawner] Verify cost-guard enforces (not just logs) + distinct exit code `-> .brief/agentic-audit.md` #security #budget
 - [ ] `gate check` subcommand — verify gates pass before firing a long refine loop `-> TASKS-AGENTIC-UX.md` #agentic-ux #gates
 - [ ] Per-run wall-clock timeout (`--run-timeout`) `-> TASKS-AGENTIC-UX.md` #safety #resilience
 - [ ] Verdict parser — fenced `<verdict>` block grammar `-> TASKS-AGENTIC-UX.md` #parsing
 
 ### Priority 2 — agentic UX wins
 
+- [x] [fixed by expo refine iter-005: src/cli.ts parseIntArg helper validates NaN/negatives across all 15 numeric-flag sites; bad input → stderr + exit 2] parseInt silently resolves to "no timeout" on bad input `-> .brief/agentic-audit.md` #agentic-ux #silent-failure
+- [x] [fixed by expo refine iter-006: parseGateVerdict / parseRalphVerdict return UNCLEAR on garbage; propagates as terminal verdict with exit 3] Verdict parsers default to DONE on garbage `-> .brief/agentic-audit.md` #parsing #silent-failure
+- [x] [fixed: src/notify.ts validateWebhookUrl() rejects non-http(s), loopback, link-local, RFC1918, unique-local IPv6, multicast, metadata hosts. Throws at setup time. 28 unit tests in tests/test-ssrf-validator.ts] SSRF via EXPO_WEBHOOK_URL `-> .brief/agentic-audit.md` #security
 - [ ] `--json` flag on `expo refine` result `-> TASKS-AGENTIC-UX.md` #agentic-ux #output
 - [ ] Pass gate-failure context into next iteration's prompt `-> TASKS-AGENTIC-UX.md` #feedback #gates
 - [ ] Token-efficient formats (TOON / compact) for gate list, --tree, --status `-> TASKS-AGENTIC-UX.md` #agentic-ux #toon

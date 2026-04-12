@@ -75,6 +75,14 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) â
   - [*] Enables oversight agents approving individual variants between iterations
   - [*] Pairs naturally with a `fold` orchestrator driving multiple expo runs
 
+## Discovered during this session (2026-04-12)
+
+- [!] `@snapshot/core` snapshot() does `git add -A` â€” scoops uncommitted work into refine/NNN commits #bug #snapshot
+  - [*] Symptom: during the audit-fix session, three of my direct-implementation edits (web.ts auth, notify.ts SSRF, cli.ts IPv6 fix) got bundled into `refine/004`, `refine/006`, `refine/007` alongside the agent's own changes. Provenance lost.
+  - [*] Trigger: any parallel editor working in the repo while `expo refine` is running with the `project-git` backend.
+  - [*] Fix: snapshot should stage only files that were actually modified between iterations (compare mtime/content against HEAD), or document the sole-writer contract and error out on unexpected changes.
+  - [*] Located at `apps/snapshot/src/snapshot.ts` in the `snapshot()` function, `git add -A` call.
+
 ## Notes and connections
 
 - The `gate check` and wall-clock timeout items unblock "unattended overnight" use cases. Without them, refine is only trustworthy for watched short runs.
