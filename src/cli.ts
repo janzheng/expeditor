@@ -36,6 +36,20 @@ const BLUE = "\x1b[34m";
 const RED = "\x1b[31m";
 const CYAN = "\x1b[36m";
 
+// --- Numeric flag parsing ---
+// parseInt("abc") returns NaN; downstream `timeout > 0 ? ... : undefined` then
+// silently disables the safety flag the caller asked for. Validate explicitly and
+// exit with code 2 on bad input so orchestrating agents see the failure.
+function parseIntArg(flag: string, raw: string | undefined, opts: { min?: number } = {}): number {
+  const min = opts.min ?? 0;
+  const v = raw === undefined ? NaN : Number(raw);
+  if (!Number.isFinite(v) || !Number.isInteger(v) || v < min) {
+    console.error(`${RED}Invalid value for ${flag}: ${JSON.stringify(raw)} (expected integer >= ${min})${RESET}`);
+    Deno.exit(2);
+  }
+  return v;
+}
+
 // --- Pretty signal printer (headless UI consumer) ---
 function printSignal(signal: AgentSignal): void {
   const agent = `${BOLD}${signal.agentId}${RESET}`;
@@ -192,15 +206,15 @@ async function cmdSpawn(args: string[]): Promise<void> {
     } else if (args[i] === "--no-worktree") {
       worktree = false;
     } else if (args[i] === "--timeout" && args[i + 1]) {
-      timeout = parseInt(args[++i]);
+      timeout = parseIntArg("--timeout", args[++i]);
     } else if (args[i] === "--sandbox" && args[i + 1]) {
       sandbox = args[++i];
     } else if (args[i] === "--auto-approve") {
       autoApprove = true;
     } else if (args[i] === "--max-turns" && args[i + 1]) {
-      maxTurns = parseInt(args[++i]);
+      maxTurns = parseIntArg("--max-turns", args[++i], { min: 1 });
     } else if (args[i] === "--max-tool-calls" && args[i + 1]) {
-      maxToolCalls = parseInt(args[++i]);
+      maxToolCalls = parseIntArg("--max-tool-calls", args[++i], { min: 1 });
     } else if (args[i] === "--validate" && args[i + 1]) {
       validateCommand = args[++i];
     }
@@ -331,7 +345,7 @@ async function cmdSpawnAll(args: string[]): Promise<void> {
   // Parse optional --timeout flag from remaining args
   let timeout = 0;
   for (let i = 1; i < args.length; i++) {
-    if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+    if (args[i] === "--timeout" && args[i + 1]) timeout = parseIntArg("--timeout", args[++i]);
   }
 
   const logFile = `${LOGS_DIR}/bus-${Date.now()}.jsonl`;
@@ -565,10 +579,10 @@ async function cmdReview(args: string[]): Promise<void> {
   let snapshotDir: string | undefined;
 
   for (let i = 1; i < args.length; i++) {
-    if (args[i] === "--max" && args[i + 1]) maxIterations = parseInt(args[++i]);
+    if (args[i] === "--max" && args[i + 1]) maxIterations = parseIntArg("--max", args[++i], { min: 1 });
     else if (args[i] === "--name" && args[i + 1]) name = args[++i];
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
-    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseIntArg("--timeout", args[++i]);
     else if (args[i] === "--work-agent" && args[i + 1]) workAgent = args[++i] as AgentType;
     else if (args[i] === "--work-model" && args[i + 1]) workModel = args[++i];
     else if (args[i] === "--review-agent" && args[i + 1]) reviewAgent = args[++i] as AgentType;
@@ -638,7 +652,7 @@ async function cmdRace(args: string[]): Promise<void> {
     if (args[i] === "--criteria" && args[i + 1]) { criteria = args[++i]; i++; continue; }
     if (args[i] === "--name" && args[i + 1]) { name = args[++i]; i++; continue; }
     if (args[i] === "--model" && args[i + 1]) { model = args[++i]; i++; continue; }
-    if (args[i] === "--timeout" && args[i + 1]) { timeout = parseInt(args[++i]); i++; continue; }
+    if (args[i] === "--timeout" && args[i + 1]) { timeout = parseIntArg("--timeout", args[++i]); i++; continue; }
     if (args[i] === "--snapshot-dir" && args[i + 1]) { snapshotDir = args[++i]; i++; continue; }
     prompts.push(args[i]);
     i++;
@@ -696,11 +710,11 @@ async function cmdRalph(args: string[]): Promise<void> {
   let model: string | undefined;
   let timeout: number | undefined;
   for (let i = 2; i < args.length; i++) {
-    if (args[i] === "--max" && args[i + 1]) maxTasks = parseInt(args[++i]);
+    if (args[i] === "--max" && args[i + 1]) maxTasks = parseIntArg("--max", args[++i], { min: 1 });
     else if (args[i] === "--review") review = true;
     else if (args[i] === "--name" && args[i + 1]) name = args[++i];
     else if (args[i] === "--model" && args[i + 1]) model = args[++i];
-    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseInt(args[++i]);
+    else if (args[i] === "--timeout" && args[i + 1]) timeout = parseIntArg("--timeout", args[++i]);
   }
 
   const logFile = `${LOGS_DIR}/bus-ralph-${Date.now()}.jsonl`;
@@ -1438,13 +1452,24 @@ switch (command) {
   case "serve": {
     let port = 3000;
     let logFile: string | undefined;
+    let host: string | undefined;
+    let authToken: string | undefined;
+    let noAuth = false;
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "--port" && args[i + 1]) port = parseInt(args[++i]);
       else if (args[i] === "--log" && args[i + 1]) logFile = args[++i];
+      else if (args[i] === "--host" && args[i + 1]) host = args[++i];
+      else if (args[i] === "--token" && args[i + 1]) authToken = args[++i];
+      else if (args[i] === "--no-auth") noAuth = true;
     }
     console.log(`${BOLD}Expeditor Dashboard${RESET}`);
     const { startServer } = await import("./web.ts");
-    await startServer({ port, logFile });
+    try {
+      await startServer({ port, logFile, host, authToken, noAuth });
+    } catch (err) {
+      console.error(`${RED}${String(err instanceof Error ? err.message : err)}${RESET}`);
+      Deno.exit(1);
+    }
     break;
   }
 
