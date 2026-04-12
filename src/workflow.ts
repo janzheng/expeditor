@@ -35,11 +35,13 @@ export interface WorkflowSpec {
 
 export interface AgentResult {
   name: string;
-  status: "success" | "failed";
+  status: "success" | "failed" | "empty";
   cost: number;
   permissionDenials: string[];
   output: string;
   exitCode: number;
+  /** Structured reason when status is "empty" or "failed" (e.g., missing output path). */
+  reason?: string;
 }
 
 export interface WorkflowResult {
@@ -222,8 +224,12 @@ export function buildSynthesisPrompt(
   parts.push(`# Agent Outputs to Read\nThe following agent output files are available:\n${fileList}`);
 
   if (failed.length > 0) {
-    const failList = failed.map((a) => `- ${a.name}`).join("\n");
-    parts.push(`# Note: Failed Agents\nThe following agents failed and have no output:\n${failList}\nAccount for these gaps in your synthesis.`);
+    const failList = failed.map((a) => {
+      const label = a.status === "empty" ? "empty" : "failed";
+      const detail = a.reason ? ` — ${a.reason}` : "";
+      return `- ${a.name} (${label})${detail}`;
+    }).join("\n");
+    parts.push(`# Note: Agents Without Output\nThe following agents produced no usable output:\n${failList}\nAccount for these gaps in your synthesis.`);
   }
 
   if (spec.formatting) {
@@ -348,23 +354,43 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
     if (settled.status === "fulfilled" && settled.value.exitCode === 0) {
       try {
         output = await Deno.readTextFile(outputPath);
+        agentResults.push({ name, status: "success", cost, permissionDenials, output, exitCode: 0 });
       } catch {
-        console.warn(`[workflow] Agent ${name} succeeded but output file missing: ${outputPath}`);
-        output = `(no output file written by agent — expected at ${outputPath})`;
+        const reason = `missing-output: expected file at ${outputPath}`;
+        console.warn(`[workflow] Agent ${name} exited 0 but output file missing: ${outputPath}`);
+        agentResults.push({
+          name,
+          status: "empty",
+          cost,
+          permissionDenials,
+          output: "",
+          exitCode: 0,
+          reason,
+        });
       }
-      agentResults.push({ name, status: "success", cost, permissionDenials, output, exitCode: 0 });
     } else {
       const exitCode = settled.status === "fulfilled" ? settled.value.exitCode : 1;
-      agentResults.push({ name, status: "failed", cost, permissionDenials, output: "", exitCode });
+      const reason = settled.status === "fulfilled"
+        ? `non-zero-exit: ${exitCode}`
+        : `spawn-error: ${settled.reason instanceof Error ? settled.reason.message : String(settled.reason)}`;
+      agentResults.push({
+        name,
+        status: "failed",
+        cost,
+        permissionDenials,
+        output: "",
+        exitCode,
+        reason,
+      });
     }
 
     totalCost += cost;
   }
 
   const succeeded = agentResults.filter((a) => a.status === "success");
-  const failed = agentResults.filter((a) => a.status === "failed");
+  const failed = agentResults.filter((a) => a.status !== "success");
 
-  // Run synthesis if any agents succeeded
+  // Run synthesis if any agents succeeded (empty/failed are excluded — no usable output).
   let synthesis: WorkflowResult["synthesis"] | undefined;
   if (succeeded.length > 0) {
     const synthPrompt = buildSynthesisPrompt(spec, succeeded, failed);

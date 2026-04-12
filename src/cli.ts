@@ -836,9 +836,12 @@ async function cmdWorkflow(args: string[]): Promise<void> {
   for (const agent of result.agents) {
     const status = agent.status === "success"
       ? `${GREEN}success${RESET}`
+      : agent.status === "empty"
+      ? `${YELLOW}empty${RESET}`
       : `${RED}failed (${agent.exitCode})${RESET}`;
+    const reasonStr = agent.status !== "success" && agent.reason ? ` ${DIM}${agent.reason}${RESET}` : "";
     const costStr = agent.cost > 0 ? ` ${DIM}$${agent.cost.toFixed(4)}${RESET}` : "";
-    console.log(`  ${agent.name}: ${status}${costStr}`);
+    console.log(`  ${agent.name}: ${status}${reasonStr}${costStr}`);
     if (agent.permissionDenials.length > 0) {
       console.log(`    ${YELLOW}⚠ Permission denials: ${agent.permissionDenials.join(", ")}${RESET}`);
     }
@@ -847,9 +850,9 @@ async function cmdWorkflow(args: string[]): Promise<void> {
   if (result.synthesis) {
     console.log("");
     console.log(`  ${GREEN}Synthesis${RESET}: completed ($${result.synthesis.cost.toFixed(4)})`);
-  } else if (result.agents.every((a) => a.status === "failed")) {
+  } else if (result.agents.every((a) => a.status !== "success")) {
     console.log("");
-    console.log(`  ${RED}Synthesis skipped${RESET}: all agents failed`);
+    console.log(`  ${RED}Synthesis skipped${RESET}: no agents produced output`);
   }
 
   console.log("");

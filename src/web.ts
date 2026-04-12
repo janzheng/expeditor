@@ -153,10 +153,73 @@ async function findLatestLog(logsDir: string): Promise<string | null> {
 export interface ServeOptions {
   port?: number;
   logFile?: string;
+  /** Interface to bind. Defaults to 127.0.0.1 (loopback only) so browser
+   *  tabs on the same machine can reach it but LAN peers cannot. Set to
+   *  "0.0.0.0" to explicitly expose on all interfaces — requires the
+   *  caller to have also set a bearer token they trust distribution of. */
+  host?: string;
+  /** Require `Authorization: Bearer <token>` on mutating routes
+   *  (POST /api/spawn, /api/race, /api/review, /api/permissions/*).
+   *  When unset, a random token is generated at startup and printed to
+   *  stderr. Set to an empty string + `noAuth: true` to disable auth
+   *  entirely (never recommended outside trusted local-only scripts). */
+  authToken?: string;
+  /** Explicit opt-out of auth. When true, all routes are open. Used for
+   *  tests and tightly-scoped scripts. Requires `host === "127.0.0.1"`
+   *  as a safety net — we refuse to serve `0.0.0.0` without auth. */
+  noAuth?: boolean;
+}
+
+/** Mutating routes that require a bearer token. Kept in a module-level
+ *  set so the dispatcher and the auth check agree on what's protected. */
+const MUTATING_ROUTES: ReadonlySet<string> = new Set([
+  "/api/spawn",
+  "/api/race",
+  "/api/review",
+  "/api/permissions/approve",
+  "/api/permissions/reject",
+]);
+
+/** Generate a random bearer token. 32 hex chars = 128 bits of entropy —
+ *  plenty for a local dev dashboard. */
+function generateBearerToken(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Check whether a mutating request carries the expected bearer token.
+ *  Uses constant-time comparison to avoid timing oracles on short tokens. */
+function isAuthorized(req: Request, expected: string): boolean {
+  const header = req.headers.get("authorization");
+  if (!header || !header.startsWith("Bearer ")) return false;
+  const provided = header.slice("Bearer ".length).trim();
+  if (provided.length !== expected.length) return false;
+  // Constant-time compare
+  let diff = 0;
+  for (let i = 0; i < provided.length; i++) {
+    diff |= provided.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 export async function startServer(opts: ServeOptions): Promise<void> {
   const port = opts.port ?? 3000;
+  const host = opts.host ?? "127.0.0.1";
+  const noAuth = opts.noAuth ?? false;
+
+  // Safety rail: refuse to bind to a non-loopback interface without auth.
+  // Anyone hitting the dashboard from another machine could otherwise POST
+  // /api/spawn and launch arbitrary commands on this host.
+  if (noAuth && host !== "127.0.0.1") {
+    throw new Error(
+      `Refusing to start: --no-auth requires --host 127.0.0.1 (got ${host}). ` +
+      `Exposing unauthenticated spawn/race/review endpoints on ${host} would let any network peer execute commands.`,
+    );
+  }
+
+  const authToken = noAuth ? "" : (opts.authToken ?? generateBearerToken());
+
   const logsDir = ".expo/logs";
 
   // Determine which log file to tail
@@ -173,7 +236,15 @@ export async function startServer(opts: ServeOptions): Promise<void> {
   }
 
   console.log(`Log: ${logFile}`);
-  console.log(`URL: http://localhost:${port}`);
+  console.log(`URL: http://${host}:${port}`);
+  if (!noAuth) {
+    console.log("");
+    console.log("Auth: mutating endpoints require `Authorization: Bearer <token>`");
+    console.log(`      Token: ${authToken}`);
+    console.log("      Export this token to use the dashboard launch UI or scripted clients.");
+  } else {
+    console.log("Auth: DISABLED (--no-auth). Loopback-only by safety check.");
+  }
   console.log("");
 
   // Start log tailer in background
@@ -198,9 +269,21 @@ export async function startServer(opts: ServeOptions): Promise<void> {
     }
   })().catch(() => {});
 
-  // HTTP server
-  Deno.serve({ port }, async (req) => {
+  // HTTP server. Binds to `host` (default 127.0.0.1) rather than all
+  // interfaces so LAN peers can't POST /api/spawn without explicit opt-in.
+  Deno.serve({ port, hostname: host }, async (req) => {
     const url = new URL(req.url);
+
+    // Gate mutating routes behind a bearer token. Auth failure returns
+    // 401 with a plain-JSON error — no token means no ability to spawn.
+    if (!noAuth && MUTATING_ROUTES.has(url.pathname)) {
+      if (!isAuthorized(req, authToken)) {
+        return new Response(
+          JSON.stringify({ error: "unauthorized", hint: "provide Authorization: Bearer <token> printed at startup" }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        );
+      }
+    }
 
     if (url.pathname === "/events") {
       const { response } = createSSEStream();
@@ -251,6 +334,11 @@ export async function startServer(opts: ServeOptions): Promise<void> {
 
 // --- API Handlers ---
 
+// CORS: intentionally NOT wildcard on mutating routes. Wildcard on GETs
+// is fine (read-only, auth-free), but spawn/race/review require bearer
+// auth and must not advertise themselves as callable from any origin —
+// that would lure browsers into attempting cross-origin POSTs even
+// though they'd be rejected at auth, which is noisy and misleading.
 const JSON_HEADERS = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
 
 async function handleListRuns(logsDir: string): Promise<Response> {
