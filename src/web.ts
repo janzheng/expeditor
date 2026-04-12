@@ -341,6 +341,79 @@ export async function startServer(opts: ServeOptions): Promise<void> {
 // though they'd be rejected at auth, which is noisy and misleading.
 const JSON_HEADERS = { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" };
 
+// --- Run-file stats cache ---
+// handleListRuns + handleCostSummary are polled by the dashboard on a
+// timer. Before this cache both walked logsDir and re-parsed every .jsonl
+// on every request — O(files × lines) per poll even though completed run
+// files are immutable. Cache keyed by {path, mtime, size} so an unchanged
+// file is parsed exactly once; any byte change invalidates.
+
+export interface RunStats {
+  agents: string[];
+  agentCosts: Record<string, number>;
+  /** Max single totalCostUsd seen in any cost event (matches the legacy
+   *  handleListRuns behaviour — cumulative cost signals arrive per agent
+   *  but we report the largest signal as the run's headline cost). */
+  maxCostSignal: number;
+}
+
+interface CacheEntry {
+  mtime: number;
+  size: number;
+  parsed: RunStats;
+}
+
+const runStatsCache = new Map<string, CacheEntry>();
+
+/** Pure: parse a JSONL bus-log body into aggregate stats. Exported for tests. */
+export function parseRunStats(content: string): RunStats {
+  const agents = new Set<string>();
+  const agentCosts: Record<string, number> = {};
+  let maxCostSignal = 0;
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    let event: { agentId?: string; type?: string; payload?: { totalCostUsd?: number } };
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const id = event.agentId;
+    if (typeof id === "string" && id.length > 0) agents.add(id);
+    if (event.type === "cost") {
+      const cost = event.payload?.totalCostUsd ?? 0;
+      if (cost > maxCostSignal) maxCostSignal = cost;
+      if (typeof id === "string" && id.length > 0) {
+        agentCosts[id] = Math.max(agentCosts[id] ?? 0, cost);
+      }
+    }
+  }
+  return { agents: Array.from(agents), agentCosts, maxCostSignal };
+}
+
+/** Return cached stats for a run file, or read + parse + cache. Exported
+ *  so tests can exercise the cache hit/miss logic without a server. */
+export async function getRunStats(path: string, mtime: number, size: number): Promise<RunStats> {
+  const cached = runStatsCache.get(path);
+  if (cached && cached.mtime === mtime && cached.size === size) {
+    return cached.parsed;
+  }
+  let content = "";
+  try {
+    content = await Deno.readTextFile(path);
+  } catch {
+    return { agents: [], agentCosts: {}, maxCostSignal: 0 };
+  }
+  const parsed = parseRunStats(content);
+  runStatsCache.set(path, { mtime, size, parsed });
+  return parsed;
+}
+
+/** Test-only: wipe the cache between scenarios. */
+export function _clearRunStatsCache(): void {
+  runStatsCache.clear();
+}
+
 async function handleListRuns(logsDir: string): Promise<Response> {
   try {
     const runs = [];
@@ -348,33 +421,15 @@ async function handleListRuns(logsDir: string): Promise<Response> {
       if (!entry.name.endsWith(".jsonl") || entry.name.endsWith(".old")) continue;
       const path = `${logsDir}/${entry.name}`;
       const stat = await Deno.stat(path);
-
-      // Quick scan: count agents and total cost from the file
-      let agentCount = 0;
-      let totalCost = 0;
-      const agents = new Set<string>();
-      try {
-        const content = await Deno.readTextFile(path);
-        for (const line of content.split("\n")) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line);
-            agents.add(event.agentId);
-            if (event.type === "cost") {
-              const cost = event.payload?.totalCostUsd ?? 0;
-              if (cost > totalCost) totalCost = cost; // cost signals are cumulative per agent
-            }
-          } catch { /* skip bad lines */ }
-        }
-        agentCount = agents.size;
-      } catch { /* file read error */ }
+      const mtime = stat.mtime?.getTime() ?? 0;
+      const stats = await getRunStats(path, mtime, stat.size);
 
       runs.push({
         filename: entry.name,
-        timestamp: stat.mtime?.getTime() ?? 0,
+        timestamp: mtime,
         size: stat.size,
-        agentCount,
-        totalCost,
+        agentCount: stats.agents.length,
+        totalCost: stats.maxCostSignal,
       });
     }
     runs.sort((a, b) => b.timestamp - a.timestamp);
@@ -441,28 +496,16 @@ async function handleCostSummary(logsDir: string): Promise<Response> {
       if (!entry.name.endsWith(".jsonl") || entry.name.endsWith(".old")) continue;
       const path = `${logsDir}/${entry.name}`;
       const stat = await Deno.stat(path);
+      const mtime = stat.mtime?.getTime() ?? 0;
+      const stats = await getRunStats(path, mtime, stat.size);
 
-      const agentCosts = new Map<string, number>();
-      try {
-        const content = await Deno.readTextFile(path);
-        for (const line of content.split("\n")) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line);
-            if (event.type === "cost") {
-              const cost = event.payload?.totalCostUsd ?? 0;
-              agentCosts.set(event.agentId, Math.max(agentCosts.get(event.agentId) ?? 0, cost));
-            }
-          } catch { /* skip */ }
-        }
-      } catch { /* skip */ }
-
-      const totalCost = Array.from(agentCosts.values()).reduce((a, b) => a + b, 0);
-      if (totalCost > 0 || agentCosts.size > 0) {
+      const agentEntries = Object.entries(stats.agentCosts);
+      const totalCost = agentEntries.reduce((a, [, v]) => a + v, 0);
+      if (totalCost > 0 || agentEntries.length > 0) {
         runs.push({
           filename: entry.name,
-          timestamp: stat.mtime?.getTime() ?? 0,
-          agents: Object.fromEntries(agentCosts),
+          timestamp: mtime,
+          agents: stats.agentCosts,
           totalCost,
         });
       }
