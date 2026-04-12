@@ -248,11 +248,52 @@ export interface RaceOptions {
 }
 
 export interface RaceResult {
-  winner: number; // 0-indexed
+  winner: number; // 0-indexed, -1 if no winner
   winnerOutput: string;
   allOutputs: string[];
   totalCostUsd: number;
   judgeReasoning: string;
+  /**
+   * True only when a judge was consulted AND its output parsed as a valid
+   * PICK verdict. False for auto-winners (only one branch succeeded),
+   * all-failed results, or when the judge's output was unparseable and a
+   * fallback branch was chosen. Lets callers branch on genuine vs default picks.
+   */
+  pickParsed: boolean;
+  /**
+   * Human-readable reason the winner was NOT a parsed judge pick. Present
+   * whenever `pickParsed` is false (including no-winner and auto-winner
+   * cases); absent when the judge produced a parseable verdict.
+   */
+  fallbackReason?: string;
+}
+
+/**
+ * Resolve a race winner from judge output. Pure function so it can be tested
+ * without spawning real agents.
+ *
+ * @param judgeOutput  Raw text returned by the judge agent.
+ * @param successIndices 0-indexed list of branches that exited 0, in original order.
+ * @param n            Total number of branches (max valid PICK value).
+ * @returns winner index plus parse provenance. `pickParsed: false` means the
+ *   judge output did not contain a `PICK <n>` line in range and we defaulted
+ *   to the first successful branch. Callers must gate trust accordingly.
+ */
+export function resolveRaceWinner(
+  judgeOutput: string,
+  successIndices: number[],
+  n: number,
+): { winner: number; pickParsed: boolean; fallbackReason?: string } {
+  const winnerNum = parsePickVerdict(judgeOutput, n);
+  if (winnerNum >= 0) {
+    return { winner: winnerNum, pickParsed: true };
+  }
+  return {
+    winner: successIndices[0],
+    pickParsed: false,
+    fallbackReason:
+      "judge output did not contain a parseable PICK <n> verdict in range; defaulted to first successful branch",
+  };
 }
 
 export async function race(
@@ -338,6 +379,8 @@ export async function race(
       allOutputs: outputs,
       totalCostUsd: totalCost,
       judgeReasoning: "All branches failed",
+      pickParsed: false,
+      fallbackReason: "all branches failed; no judge consulted",
     };
   }
 
@@ -363,6 +406,8 @@ export async function race(
       allOutputs: outputs,
       totalCostUsd: totalCost,
       judgeReasoning: `Only branch ${winnerIdx + 1} succeeded`,
+      pickParsed: false,
+      fallbackReason: `only branch ${winnerIdx + 1} succeeded; no judge consulted`,
     };
   }
 
@@ -385,8 +430,8 @@ Respond with PICK <number> (1-indexed) on the first line, followed by your reaso
   });
   totalCost += judgeResult.cost;
 
-  const winnerNum = parsePickVerdict(judgeResult.output, n);
-  const winner = winnerNum >= 0 ? winnerNum : successIndices[0];
+  const resolved = resolveRaceWinner(judgeResult.output, successIndices, n);
+  const winner = resolved.winner;
 
   // Snapshot winner's state. Winner branches run in isolated worktrees,
   // so we must copy the winner's files into snapshotDir BEFORE snapshot —
@@ -409,6 +454,8 @@ Respond with PICK <number> (1-indexed) on the first line, followed by your reaso
     allOutputs: outputs,
     totalCostUsd: totalCost,
     judgeReasoning: judgeResult.output,
+    pickParsed: resolved.pickParsed,
+    fallbackReason: resolved.fallbackReason,
   };
 }
 

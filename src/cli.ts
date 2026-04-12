@@ -693,12 +693,16 @@ async function cmdRace(args: string[]): Promise<void> {
   console.log("");
   console.log(`${BOLD}=== Race Result ===${RESET}`);
   if (result.winner >= 0) {
-    console.log(`  Winner: ${GREEN}Branch ${result.winner + 1}${RESET}`);
+    const tag = result.pickParsed ? `${GREEN}Branch ${result.winner + 1}${RESET}` : `${YELLOW}Branch ${result.winner + 1} (fallback)${RESET}`;
+    console.log(`  Winner: ${tag}`);
   } else {
     console.log(`  ${RED}No winner${RESET}`);
   }
   console.log(`  Cost: $${result.totalCostUsd.toFixed(4)}`);
   console.log(`  ${DIM}Reasoning: ${result.judgeReasoning.slice(0, 200)}${RESET}`);
+  if (result.fallbackReason) {
+    console.log(`  ${DIM}Fallback: ${result.fallbackReason}${RESET}`);
+  }
 }
 
 async function cmdRalph(args: string[]): Promise<void> {
