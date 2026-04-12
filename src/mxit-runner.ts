@@ -13,6 +13,7 @@ import {
   failTask,
   resetCrashed,
   type Task,
+  type TaskStatus,
 } from "@mxit/parser";
 
 import { SignalBus } from "./bus.ts";
@@ -76,6 +77,46 @@ export interface TaskResult {
   exitCode: number;
   agentId: string;
   costUsd: number;
+}
+
+/**
+ * Walk the (possibly nested) Task tree to find a task by its 1-based line number.
+ * Exported for reuse from the sequential-loop cache in {@link runMxit} and
+ * for regression testing (see tests/test-mxit-cache.ts).
+ */
+export function findTaskByLine(tasks: Task[], line: number): Task | undefined {
+  for (const t of tasks) {
+    if (t.line === line) return t;
+    const child = findTaskByLine(t.children, line);
+    if (child) return child;
+  }
+  return undefined;
+}
+
+/**
+ * Update a task's status in-place in a parsed Task tree so the in-memory
+ * cache stays consistent with our own claim/complete/fail writes without
+ * requiring a full re-parse. Returns true when a matching task was found.
+ */
+export function updateCachedStatus(
+  tasks: Task[],
+  line: number,
+  newStatus: TaskStatus,
+): boolean {
+  const task = findTaskByLine(tasks, line);
+  if (!task) return false;
+  task.status = newStatus;
+  if (newStatus !== "@") task.agent = undefined;
+  return true;
+}
+
+async function readMtime(filePath: string): Promise<number> {
+  try {
+    const s = await Deno.stat(filePath);
+    return s.mtime?.getTime() ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -177,11 +218,21 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
 
     let processed = 0;
 
+    // Parse TASKS.md once up front; keep the parsed tree in memory and only
+    // re-read when the file's mtime has advanced past what we expect given
+    // our own claim/complete/fail writes. External mutations (e.g., a spawned
+    // agent editing TASKS.md) are picked up via the mtime check at the top
+    // of each iteration.
+    let tasks = parseTasks(await Deno.readTextFile(tasksFile));
+    let knownMtime = await readMtime(tasksFile);
+
     // Step 2-4: Main loop
     while (processed < maxTasks) {
-      // Re-read and find ready tasks each iteration (file may have changed)
-      const content = await Deno.readTextFile(tasksFile);
-      const tasks = parseTasks(content);
+      const currentMtime = await readMtime(tasksFile);
+      if (currentMtime !== knownMtime) {
+        tasks = parseTasks(await Deno.readTextFile(tasksFile));
+        knownMtime = currentMtime;
+      }
       const ready = getReady(tasks);
 
       if (ready.length === 0) {
@@ -198,6 +249,9 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
         results.push(...batchResults);
         totalCost += batchResults.reduce((sum, r) => sum + r.costUsd, 0);
         processed += batch.length;
+        // Parallel batch mutates many lines (claims + completes/fails);
+        // force a re-parse on the next iteration.
+        knownMtime = 0;
       } else {
         // Sequential: process one task at a time
         const task = ready[0];
@@ -207,6 +261,16 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
         results.push(result);
         totalCost += result.costUsd;
         processed++;
+        if (result.status === "completed") {
+          // Only our own claim + complete mutated the file; keep the in-memory
+          // tree in sync and advance knownMtime so we skip a redundant re-parse.
+          updateCachedStatus(tasks, task.line, "x");
+          knownMtime = await readMtime(tasksFile);
+        } else {
+          // Failures add #error / #stuck tags that we don't track in-memory —
+          // force a re-parse so readiness (#stuck) is correct next iteration.
+          knownMtime = 0;
+        }
       }
     }
   } finally {
