@@ -77,11 +77,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 ## Discovered during this session (2026-04-12)
 
-- [!] `@snapshot/core` snapshot() does `git add -A` — scoops uncommitted work into refine/NNN commits #bug #snapshot
-  - [*] Symptom: during the audit-fix session, three of my direct-implementation edits (web.ts auth, notify.ts SSRF, cli.ts IPv6 fix) got bundled into `refine/004`, `refine/006`, `refine/007` alongside the agent's own changes. Provenance lost.
-  - [*] Trigger: any parallel editor working in the repo while `expo refine` is running with the `project-git` backend.
-  - [*] Fix: snapshot should stage only files that were actually modified between iterations (compare mtime/content against HEAD), or document the sole-writer contract and error out on unexpected changes.
-  - [*] Located at `apps/snapshot/src/snapshot.ts` in the `snapshot()` function, `git add -A` call.
+- [x] [fixed 2026-04-12: snapshot() gained `addPaths?: string[]`; refine.ts records git status --porcelain before/after agent spawn, passes the diff as addPaths. Validated live during audit-leaks session — refine/008-011 all stayed scoped, my parallel f278b4d web.ts symlink fix remained a separate clean commit] snapshot() does `git add -A` — scoops uncommitted work into refine/NNN commits #bug #snapshot
 
 ## Notes and connections
 
