@@ -48,7 +48,9 @@ export function validateWebhookUrl(
 
   if (opts.allowPrivate) return null;
 
-  const host = url.hostname.toLowerCase();
+  // URL.hostname keeps the surrounding brackets on IPv6 literals
+  // (e.g. "[::1]") — strip them so string-prefix checks match.
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
 
   // Explicit DNS-style hostnames we never allow
   if (host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal") {

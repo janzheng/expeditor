@@ -1396,9 +1396,17 @@ function maybeAttachWebhook(bus: import("./bus.ts").SignalBus): void {
   const url = Deno.env.get("EXPO_WEBHOOK_URL");
   if (!url) return;
   const format = (Deno.env.get("EXPO_WEBHOOK_FORMAT") ?? "generic") as "slack" | "discord" | "generic";
+  // Opt-in escape hatch for users running expo behind a VPN / corporate
+  // webhook server with a private IP. Default-denies SSRF-shaped URLs.
+  const allowPrivate = Deno.env.get("EXPO_WEBHOOK_ALLOW_PRIVATE") === "1";
   import("./notify.ts").then(({ notifyHook }) => {
-    notifyHook(bus, { webhookUrl: url, format });
-    console.log(`${DIM}Webhook: ${url} (${format})${RESET}`);
+    try {
+      notifyHook(bus, { webhookUrl: url, format, allowPrivate });
+      console.log(`${DIM}Webhook: ${url} (${format})${RESET}`);
+    } catch (err) {
+      console.error(`${RED}${String(err instanceof Error ? err.message : err)}${RESET}`);
+      console.error(`${DIM}Set EXPO_WEBHOOK_ALLOW_PRIVATE=1 to allow private-network URLs${RESET}`);
+    }
   }).catch((err) => {
     console.error(`[webhook] Failed to load notify module: ${String(err).slice(0, 100)}`);
   });
