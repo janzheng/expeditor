@@ -631,10 +631,16 @@ async function cmdReview(args: string[]): Promise<void> {
 
   console.log("");
   console.log(`${BOLD}=== Review Result ===${RESET}`);
-  console.log(`  Verdict: ${result.verdict === "DONE" ? GREEN : YELLOW}${result.verdict}${RESET}`);
+  const verdictColor = result.verdict === "DONE" ? GREEN : result.verdict === "UNCLEAR" ? RED : YELLOW;
+  console.log(`  Verdict: ${verdictColor}${result.verdict}${RESET}`);
   console.log(`  Iterations: ${result.iterations}`);
   console.log(`  Cost: $${result.totalCostUsd.toFixed(4)}`);
   console.log(`  ${DIM}Output: ${result.lastOutput.slice(0, 200)}${result.lastOutput.length > 200 ? "..." : ""}${RESET}`);
+  if (result.verdict === "UNCLEAR") {
+    console.error(`${RED}Gate output did not contain an explicit VERDICT: DONE|ITERATE — halting.${RESET}`);
+    if (result.unclearReason) console.error(`${DIM}Gate output (truncated):\n${result.unclearReason}${RESET}`);
+    Deno.exit(3);
+  }
 }
 
 async function cmdRace(args: string[]): Promise<void> {
@@ -759,9 +765,15 @@ async function cmdRalph(args: string[]): Promise<void> {
 
   console.log("");
   console.log(`${BOLD}=== Ralph Result ===${RESET}`);
-  console.log(`  Verdict: ${result.verdict === "DONE" ? GREEN : YELLOW}${result.verdict}${RESET}`);
+  const ralphColor = result.verdict === "DONE" ? GREEN : result.verdict === "UNCLEAR" ? RED : YELLOW;
+  console.log(`  Verdict: ${ralphColor}${result.verdict}${RESET}`);
   console.log(`  Tasks completed: ${result.tasksCompleted}`);
   console.log(`  Cost: $${result.totalCostUsd.toFixed(4)}`);
+  if (result.verdict === "UNCLEAR") {
+    console.error(`${RED}Gate output did not contain an explicit VERDICT: DONE|NEXT — halting.${RESET}`);
+    if (result.unclearReason) console.error(`${DIM}Gate output (truncated):\n${result.unclearReason}${RESET}`);
+    Deno.exit(3);
+  }
 }
 
 async function cmdWorkflow(args: string[]): Promise<void> {

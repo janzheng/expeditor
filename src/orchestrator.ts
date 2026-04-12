@@ -200,6 +200,20 @@ export async function reviewLoop(
       }
       return { verdict: "DONE", iterations: iteration, lastOutput, totalCostUsd: totalCost };
     }
+    if (verdict === "UNCLEAR") {
+      // Gate output didn't contain an explicit DONE/ITERATE — halt instead of
+      // silently progressing so the caller can see the parse failure.
+      if (snap && opts.snapshotDir && lastSnapshotId) {
+        await snap.restore(opts.snapshotDir, lastSnapshotId);
+      }
+      return {
+        verdict: "UNCLEAR",
+        iterations: iteration,
+        lastOutput,
+        totalCostUsd: totalCost,
+        unclearReason: reviewResult.output.slice(0, 500),
+      };
+    }
     // ITERATE — restore to pre-iteration state so bad changes don't accumulate
     if (snap && opts.snapshotDir && lastSnapshotId) {
       await snap.restore(opts.snapshotDir, lastSnapshotId);
@@ -420,10 +434,12 @@ export interface RalphOptions {
 }
 
 export interface RalphResult {
-  verdict: "DONE" | "MAX_TASKS";
+  verdict: "DONE" | "MAX_TASKS" | "UNCLEAR";
   tasksCompleted: number;
   totalCostUsd: number;
   lastOutput: string;
+  /** Set when verdict === "UNCLEAR": the gate output that failed to parse. */
+  unclearReason?: string;
 }
 
 export async function ralph(
@@ -459,6 +475,16 @@ export async function ralph(
           lastOutput,
         };
       }
+      if (reviewResult.verdict === "UNCLEAR") {
+        // Inner review gate failed to parse — propagate as terminal failure
+        return {
+          verdict: "UNCLEAR",
+          tasksCompleted: task - 1,
+          totalCostUsd: totalCost,
+          lastOutput,
+          unclearReason: reviewResult.unclearReason,
+        };
+      }
     } else {
       const workResult = await spawnAndWait(bus, spawner, {
         prompt: opts.workPrompt,
@@ -484,6 +510,17 @@ export async function ralph(
     const verdict = parseRalphVerdict(gateResult.output);
     if (verdict === "DONE") {
       return { verdict: "DONE", tasksCompleted: task, totalCostUsd: totalCost, lastOutput };
+    }
+    if (verdict === "UNCLEAR") {
+      // Gate output didn't contain an explicit DONE/NEXT — halt instead of
+      // silently continuing so the caller can see the parse failure.
+      return {
+        verdict: "UNCLEAR",
+        tasksCompleted: task,
+        totalCostUsd: totalCost,
+        lastOutput,
+        unclearReason: gateResult.output.slice(0, 500),
+      };
     }
     // NEXT — continue to next task
   }
@@ -753,26 +790,27 @@ export async function spawnAndWait(
   };
 }
 
-function parseGateVerdict(output: string, _gatePrompt: string): "DONE" | "ITERATE" {
-  const upper = output.toUpperCase();
-  for (const line of upper.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("DONE")) return "DONE";
-    if (trimmed.startsWith("ITERATE")) return "ITERATE";
+// Strict verdict parsers — require an explicit `VERDICT: <X>` or bare `<X>`
+// at the start of a line. Returns "UNCLEAR" when no well-formed verdict is
+// found so the orchestrator can halt with a parse failure rather than
+// silently defaulting (and e.g. treating chatty prose containing "looks good"
+// or "continue" as a verdict).
+function parseGateVerdict(output: string, _gatePrompt: string): "DONE" | "ITERATE" | "UNCLEAR" {
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim().toUpperCase();
+    const m = trimmed.match(/^(?:VERDICT\s*:\s*)?(DONE|ITERATE)\b/);
+    if (m) return m[1] as "DONE" | "ITERATE";
   }
-  // Default: ITERATE is safer than DONE — avoids prematurely passing gate on garbage output
-  if (!upper.includes("HIGH") && (upper.includes("PASS") || upper.includes("LOOKS GOOD") || upper.includes("NO ISSUES"))) return "DONE";
-  return "ITERATE";
+  return "UNCLEAR";
 }
 
-function parseRalphVerdict(output: string): "DONE" | "NEXT" {
+function parseRalphVerdict(output: string): "DONE" | "NEXT" | "UNCLEAR" {
   for (const line of output.split("\n")) {
-    const upper = line.trim().toUpperCase();
-    if (upper.startsWith("DONE") || upper.includes("COMPLETE") || upper.includes("FINISHED")) return "DONE";
-    if (upper.startsWith("NEXT") || upper.includes("CONTINUE")) return "NEXT";
+    const trimmed = line.trim().toUpperCase();
+    const m = trimmed.match(/^(?:VERDICT\s*:\s*)?(DONE|NEXT)\b/);
+    if (m) return m[1] as "DONE" | "NEXT";
   }
-  // Default: NEXT is safer than DONE — avoids premature termination on garbage output
-  return "NEXT";
+  return "UNCLEAR";
 }
 
 function parsePickVerdict(output: string, maxN: number): number {

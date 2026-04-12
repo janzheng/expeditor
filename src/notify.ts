@@ -17,6 +17,67 @@ export interface NotifyOptions {
   agentFilter?: string;
   /** Format: "slack" uses Slack block kit, "generic" sends raw signal */
   format?: "slack" | "discord" | "generic";
+  /** Opt-in to allow webhook URLs pointing at private networks (loopback,
+   *  link-local, RFC1918, cloud metadata IPs). Default false — prevents
+   *  SSRF where a rogue agent sets EXPO_WEBHOOK_URL=http://169.254.169.254
+   *  to exfiltrate cloud credentials via signal payloads. */
+  allowPrivate?: boolean;
+}
+
+/** Validate a webhook URL for SSRF safety. Rejects non-http(s) schemes,
+ *  refuses to block on file:// / ftp:// / dict:// URIs. When allowPrivate
+ *  is false (default), also rejects loopback, link-local, RFC1918, and
+ *  cloud-metadata IPs. Hostname-based resolution intentionally NOT done
+ *  here — DNS rebinding would defeat it; we just check the literal host.
+ *
+ *  Returns null on OK, or a human-readable reason string on reject. */
+export function validateWebhookUrl(
+  rawUrl: string,
+  opts: { allowPrivate?: boolean } = {},
+): string | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return `not a valid URL: ${rawUrl.slice(0, 80)}`;
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return `only http/https webhooks supported (got ${url.protocol})`;
+  }
+
+  if (opts.allowPrivate) return null;
+
+  const host = url.hostname.toLowerCase();
+
+  // Explicit DNS-style hostnames we never allow
+  if (host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal") {
+    return `private host ${host} rejected (set allowPrivate:true to override)`;
+  }
+
+  // IPv4 literal detection
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [a, b] = ipv4Match.slice(1).map((x) => parseInt(x, 10));
+    // Loopback (127/8), link-local (169.254/16), RFC1918 (10/8, 172.16/12,
+    // 192.168/16), 0.0.0.0, multicast (224-239), reserved (240+).
+    const isLoopback = a === 127;
+    const isLinkLocal = a === 169 && b === 254;
+    const isRfc1918 = a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+    const isUnspecified = a === 0;
+    const isMulticastOrReserved = a >= 224;
+    if (isLoopback || isLinkLocal || isRfc1918 || isUnspecified || isMulticastOrReserved) {
+      return `private IPv4 ${host} rejected (set allowPrivate:true to override)`;
+    }
+  }
+
+  // IPv6 literal detection — URL.hostname strips the [brackets]
+  // ::1 loopback, fe80::/10 link-local, fc00::/7 unique-local
+  if (host === "::1" || host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd")) {
+    return `private IPv6 ${host} rejected (set allowPrivate:true to override)`;
+  }
+
+  return null;
 }
 
 /** Format a signal as a Slack message */
@@ -64,10 +125,17 @@ function formatSignal(signal: AgentSignal, format: string): Record<string, unkno
   }
 }
 
-/** Subscribe to bus and fire webhooks */
+/** Subscribe to bus and fire webhooks. Throws during setup if the URL
+ *  fails SSRF validation — a bad URL at install-time is better than
+ *  leaking signal payloads to an attacker's chosen host at run-time. */
 export function notifyHook(bus: SignalBus, opts: NotifyOptions): () => void {
   const events = new Set(opts.events ?? ["done", "failed"]);
   const format = opts.format ?? "generic";
+
+  const urlReject = validateWebhookUrl(opts.webhookUrl, { allowPrivate: opts.allowPrivate });
+  if (urlReject) {
+    throw new Error(`[notify] webhook URL rejected: ${urlReject}`);
+  }
 
   return bus.subscribe(async (signal: AgentSignal) => {
     if (!events.has(signal.type)) return;
