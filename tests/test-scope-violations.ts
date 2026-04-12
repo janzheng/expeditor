@@ -93,6 +93,35 @@ console.log("\nfindScopeViolations — brace expansion (extended glob):");
   check("brace expansion matches both", v.length === 1 && v[0] === "src/cli.ts");
 }
 
+console.log("\nfindScopeViolations — lock files always pass (toolchain artefacts):");
+{
+  // Scenario from refine-cleanup session: agent added an import that
+  // triggered a deno.lock auto-update. Without this exemption, the
+  // whole iteration got wrongly discarded twice. This test locks in
+  // that we don't make the same mistake again.
+  const scope = ["src/claude-adapter.ts", "tests/**"];
+  const cases = [
+    ["src/claude-adapter.ts", "tests/test-foo.ts", "deno.lock"],
+    ["src/claude-adapter.ts", "package-lock.json"],
+    ["src/claude-adapter.ts", "Cargo.lock"],
+    ["src/claude-adapter.ts", "uv.lock", "poetry.lock", "Pipfile.lock"],
+  ];
+  for (const paths of cases) {
+    const v = findScopeViolations(paths, scope);
+    check(
+      `lock files pass through — ${paths.filter((p) => !p.startsWith("src/") && !p.startsWith("tests/")).join(", ")}`,
+      v.length === 0,
+    );
+  }
+
+  // Real-looking violation (not a lock file) is still caught
+  const stillCaught = findScopeViolations(
+    ["src/claude-adapter.ts", "src/untouched.ts"],
+    ["src/claude-adapter.ts", "tests/**"],
+  );
+  check("non-lock file outside scope still caught", stillCaught.length === 1 && stillCaught[0] === "src/untouched.ts");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) {
   for (const f of failures) console.log(`  - ${f}`);

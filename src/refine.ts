@@ -1128,11 +1128,33 @@ export async function removeRefineGate(
   }
 }
 
+/** Package-manager lock files and other build artefacts that get touched
+ *  automatically as a side effect of legitimate agent work (e.g. adding
+ *  an import triggers a Deno cache update). We always allow these through
+ *  scope checks — the agent didn't "choose" to modify them, the
+ *  toolchain did. If a rubric explicitly wants to prevent lockfile drift,
+ *  use a gate that runs `git diff --name-only <file>` instead. */
+const ALWAYS_IN_SCOPE: ReadonlySet<string> = new Set([
+  "deno.lock",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "Cargo.lock",
+  "go.sum",
+  "uv.lock",
+  "poetry.lock",
+  "Pipfile.lock",
+  "composer.lock",
+  "Gemfile.lock",
+  "mix.lock",
+]);
+
 /** Return the subset of `paths` that don't match any of the allowed
  *  glob patterns. Non-empty return = scope violation — caller should
- *  discard the iteration. Globs are compiled once per call; for the
- *  scale of a refine loop (tens of files, a handful of patterns) the
- *  allocation cost is negligible. */
+ *  discard the iteration. Lock files and similar build artefacts are
+ *  always-allowed (see ALWAYS_IN_SCOPE). Globs are compiled once per
+ *  call; for the scale of a refine loop (tens of files, a handful of
+ *  patterns) the allocation cost is negligible. */
 export function findScopeViolations(paths: string[], scope: string[]): string[] {
   if (scope.length === 0) return [];
   const regexes = scope.map((g) =>
@@ -1140,6 +1162,10 @@ export function findScopeViolations(paths: string[], scope: string[]): string[] 
   );
   const violations: string[] = [];
   for (const p of paths) {
+    // Build artefacts auto-modified by the toolchain are always fine.
+    // Checks basename only so `./deno.lock` and `deno.lock` both match.
+    const basename = p.split("/").pop() ?? p;
+    if (ALWAYS_IN_SCOPE.has(basename)) continue;
     if (!regexes.some((rx) => rx.test(p))) {
       violations.push(p);
     }

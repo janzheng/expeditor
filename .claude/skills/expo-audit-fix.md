@@ -54,10 +54,20 @@ Ask the user **at most 3 questions** — fewer if you can infer. Use AskUserQues
 **Q2 — Budget.** Default `$4` total, `$1/agent`. Ask only if the user hasn't specified.
 
 **Q3 — Scope.** Auto-propose based on goal:
-- `fix-audit` → derive scope from the files mentioned in the audit's `**File:**` lines
+- `fix-audit` → derive scope from the files mentioned in the audit's `**File:**` lines, **plus `src/**/*.ts` as a floor if those files import from unlisted helpers** (agents sometimes legitimately create new helper files for clean architecture — if scope is too narrow they can't do good work)
 - `security` → all `src/**`
 - `cleanup` → `src/**` but exclude tests/ and generated files
 - `custom` → ask the user which files/globs
+
+Always include `tests/**` in scope — refine requires regression tests per fix.
+
+**Scope-writing gotchas** (learned the hard way in Session 3 of this codebase's own refine history):
+
+1. **Lock files are auto-exempt.** `deno.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `go.sum`, `uv.lock`, `poetry.lock`, `Pipfile.lock`, `composer.lock`, `Gemfile.lock`, `mix.lock` — all auto-allowed regardless of scope. The toolchain modifies them as a side effect when imports change; the agent didn't choose to touch them. (This is enforced by `findScopeViolations` in src/refine.ts; skill just documents the list.)
+
+2. **Scope too narrowly → agents can't extract new helpers.** If the rubric's cleanest fix is "extract a pure helper into a new file", an over-narrow `--scope "src/specific-file.ts"` will force-discard the iteration. For audit-fix sessions, default to a 2-line floor: `"src/**/*.ts"` (or language equivalent) + `"tests/**"`. Add more restrictive globs only if the user explicitly needs a file to NOT be touched.
+
+3. **Scope as a guardrail, not a map.** The user mental model should be "what must NOT be touched" → exclude from scope, NOT "what SHOULD be touched" → enumerate. Agents need room to create supporting files; that's usually good code, not a violation.
 
 **Explicitly do NOT ask about:**
 - Which gates to use (auto-derive from project shape — step 1)
