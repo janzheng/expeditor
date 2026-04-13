@@ -356,6 +356,54 @@ the other ten shipped same-day.
   was 12), covering tracked-preserved / untracked-removed / non-git
   safe-fallback.
 
+- [x] **Finding #17** (SEV-2 / root-cause follow-up to #15) — agent-
+  harness contract gap. Agents skip the `<verdict>` wrapper 40-80%
+  of iters even after prompt hardening; the #15 retry recovered the
+  work but at ~$0.10-$0.15 tax per iter on the majority of runs.
+  Post-hoc severity analysis: #15 was a silent-destroy P0; this is
+  the "we routed around it, now close the hole properly" SEV-2.
+  **Shipped 2026-04-13 on branch `finding-17-multi-layer-verdict`:**
+  Four-layer verdict-parsing stack in `refine.ts`:
+  1. Fenced `<verdict>{...}</verdict>` — ideal, unchanged.
+  2. Legacy `VERDICT: KEEP` lines — unchanged.
+  3. **NEW** — natural-language prose inference. Regex patterns for
+     keep signals ("all N tests pass", "closes/resolves rubric item",
+     "keeping this") and converged signals ("rubric fully met",
+     "nothing more to do"). Discard signals ("rolling back",
+     "discarding", "didn't help") force a fall-through to discourage
+     false-keep upgrades on ambiguous prose. Discard is NEVER
+     inferred — silent destruction stays impossible.
+  4. **NEW** — default-keep-if-safe in the main loop. When all
+     three parser layers miss AND the agent made tracked changes,
+     default to keep and let the gate step (which runs after) force-
+     discard if anything broke. Flips the pre-#17 default from
+     discard to keep on ambiguity; the invariant ratchet (gates)
+     still catches bad keeps. Only applies when `agentTouchedPaths`
+     is defined and non-empty.
+  5. Retry-on-parse-fail (#15) — now truly last-resort, fires ONLY
+     when `agentTouchedPaths` is undefined (non-git backend) since
+     Layer 4 can't decide without it. Expected retry rate drops
+     from 40-80% of iters to <5%.
+  Telemetry: `ParsedVerdict.parseMethod` + `refineParseMethod` in
+  the bus signal now surfaces which layer produced the verdict
+  (`fenced` / `legacy-line` / `inferred-prose` / `defaulted-keep` /
+  `extraction-retry` / `defaulted-discard`). Lets us observe over
+  time whether the agent-harness contract is drifting.
+  14 new unit tests in `tests/test-refine-gates.ts` (50 passing,
+  was 36) covering each layer, fenced-beats-prose precedence, and
+  the ambiguous-signal fall-through.
+  **Deferred (documented not shipped):**
+  - MCP tool-use / API-direct verdict submission. The cleanest
+    root-cause fix (structured output that agents cannot forget to
+    emit) but requires per-adapter work — `expo spawn` uses the
+    claude CLI / codex CLI / opencode / pi, not direct API calls.
+    Revisit when a workable contract for tool-use exists across
+    adapters.
+  - Retry-accuracy audit. We've observed 10/10 retries return keep;
+    haven't audited whether any of those SHOULD have been discard
+    based on original-agent intent. Sample size small; revisit if
+    patterns emerge in production use.
+
 ### Rainy-day: tier-4 pathological
 
 - [?] Pathological gambling run on the research repo

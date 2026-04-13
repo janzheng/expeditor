@@ -147,25 +147,121 @@ SUMMARY: did not help
   check("proposal still parsed (loop decides what to do)", parsed.gateProposals.length === 1);
 }
 
-// ── Test 5b: Finding #15 — parseFailed flag is set when no verdict is found ──
+// ── Finding #15/#17: the multi-layer verdict-parsing stack ──
 
-console.log("\nparseVerdict — Finding #15: parseFailed=true when no block/line found:");
+// Test 5b: Finding #17 Layer 3 — "All N tests pass" prose infers keep.
+// (Pre-#17 this output hit the parseFailed path and defaulted to discard —
+// that's the silent-destroy P0 we fixed.)
+
+console.log("\nparseVerdict — Layer 3: 'all N tests pass' prose infers keep:");
 {
-  // Agent did work, narrated it in prose, but never emitted the <verdict>
-  // block or the legacy VERDICT: line. This is exactly the 2026-04-13
-  // snapshot iter-3/iter-5 failure mode.
   const output = `
 I examined snapshot.ts and added timeoutMs validation at the boundary.
 All 31 tests pass including the new boundary test.
 The change is focused and low-risk.
 `;
   const parsed = parseVerdict(output);
-  check("action=discard (safe default)", parsed.action === "discard");
-  check("parseFailed=true flag set", parsed.parseFailed === true);
-  check("summary mentions parse failure", parsed.summary.includes("Could not parse"));
+  check("action=keep (inferred from prose)", parsed.action === "keep");
+  check("parseMethod='inferred-prose'", parsed.parseMethod === "inferred-prose");
+  check("parseFailed NOT set (Layer 3 succeeded)", !parsed.parseFailed);
 }
 
-console.log("\nparseVerdict — Finding #15: parseFailed is NOT set on successful fenced parse:");
+console.log("\nparseVerdict — Layer 3: 'closes rubric item' prose infers keep:");
+{
+  const output = `
+I closed the rubric item on atomic manifest writes by switching writeManifest
+to a tmp-file + rename pattern.
+`;
+  const parsed = parseVerdict(output);
+  check("action=keep", parsed.action === "keep");
+  check("parseMethod='inferred-prose'", parsed.parseMethod === "inferred-prose");
+}
+
+console.log(
+  "\nparseVerdict — Layer 3: discard signal blocks keep inference (fall-through):",
+);
+{
+  // Agent said "All N tests pass" BUT also said "rolling back" — ambiguous,
+  // so Layer 3 must NOT claim keep. Falls through to default-discard at
+  // parseVerdict level; main loop's Layer 4 can still upgrade with more
+  // context (did the agent actually roll back? agentTouchedPaths would tell).
+  const output = `
+Tried a refactor, ran the tests: all 31 tests pass.
+On review though, I'm rolling back — the approach doesn't fit the rubric.
+`;
+  const parsed = parseVerdict(output);
+  check("action=discard (ambiguous → default)", parsed.action === "discard");
+  check("parseMethod='defaulted-discard'", parsed.parseMethod === "defaulted-discard");
+  check("parseFailed=true", parsed.parseFailed === true);
+}
+
+console.log(
+  "\nparseVerdict — Layer 3: no signals at all → defaulted-discard:",
+);
+{
+  // Agent emitted pure narrative with no keep or discard signals. Layer 3
+  // correctly declines to infer; Layer 4 in the main loop may upgrade to
+  // keep if agentTouchedPaths is non-empty.
+  const output = `
+I read through snapshot.ts and mod.ts. The module has an interesting
+structure with two backends, hidden-git and project-git, and a shared
+types.ts. I made no changes this iteration.
+`;
+  const parsed = parseVerdict(output);
+  check("action=discard (no signals)", parsed.action === "discard");
+  check("parseMethod='defaulted-discard'", parsed.parseMethod === "defaulted-discard");
+  check("parseFailed=true", parsed.parseFailed === true);
+}
+
+console.log(
+  "\nparseVerdict — Layer 3: 'rubric met' prose infers converged:",
+);
+{
+  const output = `
+Looking at the rubric, all four in-scope criteria are addressed.
+Rubric is fully met; nothing more to do.
+`;
+  const parsed = parseVerdict(output);
+  check("action=converged", parsed.action === "converged");
+  check("parseMethod='inferred-prose'", parsed.parseMethod === "inferred-prose");
+}
+
+console.log(
+  "\nparseVerdict — Layer 1 (fenced) wins over Layer 3 prose signals:",
+);
+{
+  // Even if "all tests pass" shows up in prose, a fenced block should take
+  // precedence — the fenced layer is higher-confidence.
+  const output = `
+Did the work. All 50 tests pass.
+
+<verdict>
+{"action": "discard", "change": "x", "summary": "on reflection this is not a win"}
+</verdict>
+`;
+  const parsed = parseVerdict(output);
+  check("action=discard (fenced beats prose)", parsed.action === "discard");
+  check("parseMethod='fenced'", parsed.parseMethod === "fenced");
+}
+
+console.log(
+  "\nparseVerdict — Layer 2 (legacy lines) sets parseMethod='legacy-line':",
+);
+{
+  const output = `
+VERDICT: KEEP
+CHANGE: small win
+SUMMARY: done
+`;
+  const parsed = parseVerdict(output);
+  check("action=keep", parsed.action === "keep");
+  check("parseMethod='legacy-line'", parsed.parseMethod === "legacy-line");
+  check("parseFailed NOT set", !parsed.parseFailed);
+}
+
+console.log(
+  "\nparseVerdict — Layer 1 (fenced) sets parseMethod='fenced':",
+);
 {
   const output = `
 Did the work.
@@ -176,19 +272,8 @@ Did the work.
 `;
   const parsed = parseVerdict(output);
   check("action=keep", parsed.action === "keep");
-  check("parseFailed undefined/false", !parsed.parseFailed);
-}
-
-console.log("\nparseVerdict — Finding #15: parseFailed is NOT set on legacy line grammar:");
-{
-  const output = `
-VERDICT: KEEP
-CHANGE: small win
-SUMMARY: done
-`;
-  const parsed = parseVerdict(output);
-  check("action=keep", parsed.action === "keep");
-  check("parseFailed undefined/false", !parsed.parseFailed);
+  check("parseMethod='fenced'", parsed.parseMethod === "fenced");
+  check("parseFailed NOT set", !parsed.parseFailed);
 }
 
 // ── Test 6: Integration — snapshot primitives give refine everything it needs ──

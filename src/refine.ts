@@ -174,6 +174,19 @@ interface GateProposal {
   timeoutMs?: number;
 }
 
+/** Which layer in the multi-layer verdict-parsing stack produced this
+ *  verdict. Observability (and the #15-adjacent research question of
+ *  whether the agent-harness contract is drifting over time). Ordered
+ *  by preference — "fenced" is ideal, later entries are progressively
+ *  less trustworthy. */
+type ParseMethod =
+  | "fenced" // Layer 1: <verdict>{...}</verdict> block, ideal path
+  | "legacy-line" // Layer 2: VERDICT: KEEP / CHANGE: / SUMMARY: lines
+  | "inferred-prose" // Layer 3: natural-language patterns in the agent's prose
+  | "defaulted-keep" // Layer 4: no verdict emitted, but gates pass + changes made
+  | "extraction-retry" // Layer 5: spawned a cheap recovery agent (rare, last resort)
+  | "defaulted-discard"; // No layer succeeded; safest default
+
 interface ParsedVerdict {
   action: "keep" | "discard" | "converged";
   change: string;
@@ -181,14 +194,22 @@ interface ParsedVerdict {
   /** Any GATE_PROPOSAL lines the agent emitted. Only used when
    *  allowAgentGates is true; otherwise ignored. */
   gateProposals: GateProposal[];
-  /** True when neither the fenced `<verdict>{...}</verdict>` block nor the
-   *  legacy line grammar (`VERDICT: KEEP` etc.) could be found/parsed in
-   *  the agent's output, and the action was defaulted to "discard". Callers
-   *  may choose to spawn an extraction-retry before accepting the default —
-   *  see Finding #15 (2026-04-13 snapshot shakedown): agents doing real work
-   *  sometimes forget the verdict wrapper and get force-discarded despite
-   *  passing gates. */
+  /** True when neither the fenced `<verdict>{...}</verdict>` block, the
+   *  legacy line grammar, nor natural-language inference could parse the
+   *  agent's output, and the action was defaulted to "discard". Callers
+   *  may choose to spawn an extraction-retry before accepting the default
+   *  — see Finding #15 and #17 (2026-04-13 snapshot shakedown): agents
+   *  doing real work frequently forget the verdict wrapper and get force-
+   *  discarded despite passing gates. Kept on the interface for backward
+   *  compatibility with early-Finding-#15 callers; new code should use
+   *  `parseMethod` for richer signal. */
   parseFailed?: boolean;
+  /** Which layer produced this verdict. Always set. "fenced" and
+   *  "legacy-line" are high-confidence; "inferred-prose", "defaulted-keep",
+   *  and "extraction-retry" are mitigations for the agent-harness contract
+   *  gap and should be tracked over time. "defaulted-discard" means no
+   *  layer succeeded — equivalent to `parseFailed: true`. */
+  parseMethod?: ParseMethod;
 }
 
 // ── Constants ──────────────────────────────────────────────────
@@ -838,44 +859,92 @@ To proceed, pick one:
     // Any non-infra iteration resets the streak.
     consecutiveInfraFailures = 0;
 
-    // f. Parse verdict
+    // f. Parse verdict — multi-layer stack (Finding #15 + #17):
+    //    Layer 1: fenced <verdict>{...}</verdict>                 (ideal, inside parseVerdict)
+    //    Layer 2: legacy VERDICT: KEEP lines                      (inside parseVerdict)
+    //    Layer 3: natural-language prose inference                (inside parseVerdict)
+    //    Layer 4: default-keep-if-safe (gates will verify)        (below)
+    //    Layer 5: spawn a verdict-extraction retry agent          (below, last resort)
+    //
+    // Silent-destroy of legitimate work is the bug class we're defending
+    // against. Agents skip the structured wrapper in 40-80% of iters on
+    // Claude Code CLI despite explicit instructions; the multi-layer stack
+    // preserves work without trusting the agent to follow the contract.
     let verdict = parseVerdict(result.output);
 
-    // Finding #15: if the agent did work but forgot the <verdict> wrapper,
-    // spawn a cheap extraction-retry before accepting the force-discard.
-    // Observed in the 2026-04-13 snapshot run at 40% parse-fail rate; the
-    // discarded work was keep-quality in both cases. A ~$0.10 retry is worth
-    // it against a $0.60-1.00 iteration that would otherwise be lost to
-    // format noise.
     if (verdict.parseFailed) {
-      console.log(
-        `[refine] iter ${iterations}: verdict parse failed — attempting extraction retry`,
-      );
-      const retried = await retryVerdictExtraction(result.output, bus, spawner, {
-        name: `${agentName}-verdict-retry`,
-        agent: opts.agent,
-        model: opts.model,
-        cwd: dir,
-        sandbox: opts.sandbox,
-      });
-      if (retried) {
+      // Layer 4: default-keep-if-safe. If the agent made tracked changes
+      // and didn't emit any discard signal, default to KEEP — the gate
+      // step that runs after this will still force-discard if the agent's
+      // changes broke anything, so the invariant ratchet is intact.
+      // Flipping the default from discard to keep eliminates the P0
+      // silent-destroy class (Finding #15) at the harness level.
+      const madeChanges = agentTouchedPaths !== undefined && agentTouchedPaths.length > 0;
+      const cantTellIfChanges = agentTouchedPaths === undefined;
+
+      if (madeChanges) {
+        verdict = {
+          action: "keep",
+          change: verdict.change || "(no change description emitted)",
+          summary: "No explicit verdict emitted; agent made changes. Gates will verify.",
+          gateProposals: verdict.gateProposals,
+          parseMethod: "defaulted-keep",
+        };
         console.log(
-          `[refine] iter ${iterations}: extraction retry recovered verdict: ${retried.action}`,
+          `[refine] iter ${iterations}: no explicit verdict — defaulting to keep (gates will verify) [Layer 4]`,
         );
-        verdict = retried;
-      } else {
+      } else if (cantTellIfChanges) {
+        // Layer 5: last-resort retry. We can't see what the agent did
+        // (e.g., non-git backend), so ask a cheap extraction agent to
+        // read the prose and emit a verdict on the original agent's
+        // behalf. ~$0.10-$0.15 per retry.
         console.log(
-          `[refine] iter ${iterations}: extraction retry also failed — accepting default discard`,
+          `[refine] iter ${iterations}: no explicit verdict + can't determine changes — attempting extraction retry [Layer 5]`,
+        );
+        const retried = await retryVerdictExtraction(result.output, bus, spawner, {
+          name: `${agentName}-verdict-retry`,
+          agent: opts.agent,
+          model: opts.model,
+          cwd: dir,
+          sandbox: opts.sandbox,
+        });
+        if (retried) {
+          console.log(
+            `[refine] iter ${iterations}: extraction retry recovered verdict: ${retried.action}`,
+          );
+          verdict = { ...retried, parseMethod: "extraction-retry" };
+        } else {
+          console.log(
+            `[refine] iter ${iterations}: extraction retry also failed — accepting default discard`,
+          );
+        }
+      } else {
+        // agentTouchedPaths is defined but empty — agent made NO changes.
+        // Discard is correct; no work to preserve.
+        console.log(
+          `[refine] iter ${iterations}: no explicit verdict and no changes made — discarding`,
         );
       }
     }
 
-    // Emit refine_verdict signal for dashboard tracking
-    await emitRefineProgress(bus, agentName, iterations, `refine_verdict: ${verdict.action} — ${verdict.change}`, {
-      refineVerdict: verdict.action,
-      refineChange: verdict.change,
-      refineSummary: verdict.summary,
-    });
+    // Emit refine_verdict signal for dashboard tracking. Annotate the verdict
+    // string with the parse method when it wasn't the ideal fenced path —
+    // surfaces the harness-contract drift described in Finding #17 so we can
+    // see over time whether the agent's adherence is improving or degrading.
+    const method = verdict.parseMethod ?? "unknown";
+    const methodAnnotation = (method === "fenced" || method === "legacy-line") ? "" : ` [${method}]`;
+    await emitRefineProgress(
+      bus,
+      agentName,
+      iterations,
+      `refine_verdict: ${verdict.action}${methodAnnotation} — ${verdict.change}`,
+      {
+        refineVerdict: verdict.action,
+        refineChange: verdict.change,
+        refineSummary: verdict.summary,
+        refineParseMethod: method,
+      },
+    );
 
     // Approval gate: either interactive (TTY) or hook (non-TTY). Hook wins
     // if both set — non-TTY is the more deliberate configuration.
@@ -1572,18 +1641,31 @@ function buildArchiveContext(variants: Variant[]): string {
 }
 
 // ── Verdict parsing ────────────────────────────────────────────
+//
+// The verdict parser is a multi-layer stack. Each layer catches the cases
+// the previous one missed, so we get robustness without a rewrite when
+// agents drift off the contract. Observed on snapshot shakedown (2026-04-13)
+// that Claude agents skip the fenced block in 40-80% of iterations despite
+// explicit instructions — so the cheaper layers here are the difference
+// between a working tool and a tool that silently throws away half its work.
+//
+//   Layer 1: fenced `<verdict>{...}</verdict>` block           (ideal)
+//   Layer 2: legacy `VERDICT: KEEP` lines                      (rarely used by agents)
+//   Layer 3: natural-language prose inference (keep-only)      (Finding #17)
+//   Layer 4: default-keep-if-safe (in the caller, not here)    (Finding #17)
+//   Layer 5: spawn a verdict-extraction retry agent            (last resort)
+//
+// Discard is only returned when an AGENT explicitly signals it (fenced, legacy,
+// or explicit prose — "rolling back", "discarding"). We never infer discard
+// from absence of signal — silent-destroy is the bug we're defending against.
 
 // Exported for unit testing only — not part of the public API.
 export function parseVerdict(output: string): ParsedVerdict {
-  // Prefer a fenced `<verdict>{...}</verdict>` block when present — it's an
-  // unambiguous grammar that can't collide with prose the agent writes about
-  // the verdict format itself (the line-based parser has had issues there).
-  // Falls back to the legacy line grammar when no block is found OR the block
-  // exists but its JSON doesn't parse.
+  // Layer 1: fenced block. High confidence.
   const fenced = tryParseFencedVerdict(output);
-  if (fenced) return fenced;
+  if (fenced) return { ...fenced, parseMethod: "fenced" };
 
-  // Try to find structured verdict in the output
+  // Layer 2: legacy line grammar.
   const lines = output.split("\n");
 
   let action: "keep" | "discard" | "converged" | null = null;
@@ -1623,33 +1705,123 @@ export function parseVerdict(output: string): ParsedVerdict {
     }
   }
 
-  // If no structured verdict found, default to DISCARD
-  let parseFailed = false;
-  if (!action) {
-    // Try to infer from the output
-    const upper = output.toUpperCase();
-    if (upper.includes("VERDICT: CONVERGED") || upper.includes("VERDICT:CONVERGED") || upper === "CONVERGED") {
-      action = "converged";
-    } else if (upper.includes("VERDICT: KEEP") || upper.includes("VERDICT:KEEP")) {
-      action = "keep";
-    } else {
-      // Default to discard if unparseable — safe fallback
-      action = "discard";
-      if (!summary) {
-        summary = "Could not parse agent verdict — defaulting to discard";
-      }
-      parseFailed = true;
+  if (action) {
+    if (!change) change = extractFirstMeaningfulLine(output);
+    return { action, change, summary, gateProposals, parseMethod: "legacy-line" };
+  }
+
+  // Loose inference from the top-level output for corrupted legacy formats
+  // ("the verdict is VERDICT: KEEP" — keyword present but not line-anchored).
+  // Kept for backward compatibility with the pre-#17 parser.
+  const upper = output.toUpperCase();
+  if (upper.includes("VERDICT: CONVERGED") || upper.includes("VERDICT:CONVERGED") || upper.trim() === "CONVERGED") {
+    return {
+      action: "converged",
+      change: change || extractFirstMeaningfulLine(output),
+      summary,
+      gateProposals,
+      parseMethod: "legacy-line",
+    };
+  }
+  if (upper.includes("VERDICT: KEEP") || upper.includes("VERDICT:KEEP")) {
+    return {
+      action: "keep",
+      change: change || extractFirstMeaningfulLine(output),
+      summary,
+      gateProposals,
+      parseMethod: "legacy-line",
+    };
+  }
+
+  // Layer 3: natural-language prose inference (Finding #17). The agent
+  // emitted real work + a prose summary but forgot the structured wrapper.
+  // Only infer "keep" or "converged" from prose — never "discard" — so
+  // silent destruction remains impossible.
+  const inferred = inferVerdictFromProse(output);
+  if (inferred) {
+    return {
+      action: inferred.action,
+      change: change || inferred.change || extractFirstMeaningfulLine(output),
+      summary: summary || inferred.summary || "",
+      gateProposals,
+      parseMethod: "inferred-prose",
+    };
+  }
+
+  // All layers missed. Return a defaulted-discard; callers may upgrade to
+  // defaulted-keep (Layer 4) or extraction-retry (Layer 5) with more context.
+  return {
+    action: "discard",
+    change: change || extractFirstMeaningfulLine(output),
+    summary: summary || "Could not parse agent verdict — defaulting to discard",
+    gateProposals,
+    parseFailed: true,
+    parseMethod: "defaulted-discard",
+  };
+}
+
+/** Layer 3 of the verdict-parsing stack (Finding #17): infer a verdict from
+ *  natural-language patterns in the agent's prose. Only infers "keep" and
+ *  "converged" — never "discard", because discard requires positive evidence
+ *  of agent intent. Silent-destroy-the-work is the bug class this whole
+ *  stack defends against.
+ *
+ *  Returns `null` when the signal is absent, weak, or ambiguous (both keep
+ *  and discard phrases present in the tail). Ambiguous → fall through to
+ *  Layer 4 (default-keep-if-safe) in the caller. */
+export function inferVerdictFromProse(
+  output: string,
+): { action: "keep" | "converged"; change: string; summary: string } | null {
+  // Only look at the tail — older prose (file reads, scratchpad thinking)
+  // shouldn't dilute the signal from the agent's final summary.
+  const tail = output.length > 3000 ? output.slice(-3000) : output;
+
+  // Discard signals force a fall-through. If the agent used any of these,
+  // we don't want to guess — either they had a legit discard intent we
+  // shouldn't clobber into keep, or the signal is mixed and Layer 4/5
+  // will handle it with more context. Kept narrow to avoid false positives
+  // on agent self-narration ("I was going to discard but kept it").
+  const discardSignals = [
+    /\brolling[ -]back\b/i,
+    /\breverting (?:the |my |this )?(?:change|work|edit)/i,
+    /\bdiscarding (?:this|the|my)\b/i,
+    /\bthis (?:change )?(?:made (?:it|things) worse|didn't help|wasn't (?:useful|an improvement))/i,
+    /\bnot (?:worth keeping|an improvement)\b/i,
+  ];
+  for (const re of discardSignals) {
+    if (re.test(tail)) return null;
+  }
+
+  // Converged signals (rare in practice but worth surfacing).
+  const convergedSignals = [
+    /\brubric (?:is )?(?:fully |completely |now )?(?:met|satisfied|addressed)\b/i,
+    /\ball (?:rubric )?(?:criteria|items|points) (?:are )?(?:met|satisfied|addressed)\b/i,
+    /\bnothing (?:more|else|further|left) to (?:do|improve|address|add)\b/i,
+    /\bproject (?:is )?(?:now )?converged\b/i,
+  ];
+  for (const re of convergedSignals) {
+    if (re.test(tail)) {
+      return { action: "converged", change: "", summary: "inferred: rubric met (prose)" };
     }
   }
 
-  // If change is empty, try to extract something useful from the output
-  if (!change) {
-    change = extractFirstMeaningfulLine(output);
+  // Keep signals — observed patterns from 2026-04-13 snapshot shakedown.
+  // Agents reliably emit "All N tests pass" + change summary after a
+  // successful iteration. Also common: "closes/resolves rubric item X".
+  const keepSignals = [
+    /\ball \d+ tests? (?:pass(?:ing|ed)?|are passing)\b/i,
+    /\b(?:close[sd]?|resolve[sd]?|address(?:e[sd])?) (?:the )?rubric\b/i,
+    /\b(?:this |the )?change (?:is|was) (?:kept|an improvement|a (?:clear )?win)\b/i,
+    /\bi(?:'ll| am going to|'ve)? keep(?:ing|s|t)?\b(?!\s+(?:in mind|track))/i,
+    /\bkeeping (?:this|the change|it)\b/i,
+  ];
+  for (const re of keepSignals) {
+    if (re.test(tail)) {
+      return { action: "keep", change: "", summary: "inferred: keep (prose pattern)" };
+    }
   }
 
-  return parseFailed
-    ? { action, change, summary, gateProposals, parseFailed: true }
-    : { action, change, summary, gateProposals };
+  return null;
 }
 
 /**
