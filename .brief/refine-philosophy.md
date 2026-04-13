@@ -269,6 +269,136 @@ This is a legitimate governance problem, not a bug. Mitigations:
 
 ---
 
+## Convergent vs divergent briefs — both valid, different purposes
+
+Observed during the Shakedown B tier-1 runs: the same rubric on
+similar codebases produces very similar iter-1 proposals. On expo,
+snapshot v1, snapshot v2, and smolvm, iter-1's target was always
+some form of "API-boundary validation" — because that's literally
+what the rubric told it to look for first.
+
+This *looks* like convergence bias (same model + same brief =
+similar output), and in a strict methodological sense it is. But
+that framing misses the key distinction:
+
+**A refine run is inspection, not research.** You're not asking
+"what's interesting here?" — you're asking "apply this checklist."
+Convergence across runs is the target behavior, not a failure mode.
+When two senior engineers independently review the same code against
+the same checklist, we want them to find similar issues. The
+convergence validates the checklist, it doesn't devalue the review.
+
+That said, the framing matters because **sometimes you want
+divergence** — finding *new classes* of bugs you didn't know to
+look for. For that you want a different tool shape.
+
+### When to use a convergent (tight) brief
+
+- You know the class of bug you're hunting (validation gaps,
+  error clarity, test coverage holes, style inconsistency).
+- You want repeatable, auditable sweeps — same rubric, multiple
+  repos, compare output across them.
+- You're doing maintenance-grade polish on mature code.
+- Cost matters — tight rubric keeps cost-per-keep low.
+
+This is expo `refine`'s sweet spot. The rubric in
+`.brief/SELF-REFINE-RUBRIC.md` is a convergent brief.
+
+### When to use a divergent (open) brief
+
+- You don't yet know what the bug classes are.
+- You're doing first-pass exploration of unfamiliar code.
+- You want parallel proposals that surface different angles.
+- You can afford the noise — many proposals won't pan out, and
+  the value is in the occasional surprising hit.
+
+Expo `refine` is NOT ideal for this. The rubric is a single prompt,
+one model, one direction at a time. You could loosen the rubric to
+"find anything wrong" but you'd likely get cheap-looking keeps that
+drift the code without finding surprises.
+
+For divergent exploration, reach for:
+
+- **`expo race`** — run two or three approaches in parallel, judge
+  picks the winner. A natural fit for "try these three framings
+  of the problem and see which turns up something real."
+- **`expo workflow`** — fan out multiple focused agents (each with
+  its own narrower rubric), synthesize findings. The fan-out step
+  IS divergence; the synthesis lets a reviewer agent spot clusters.
+- **Multiple refine runs with different rubrics** — the operator's
+  version of the same idea. Run refine with a validation rubric,
+  then a performance rubric, then a security rubric. Each is
+  convergent on its own; the COLLECTION is divergent.
+- **Manual audit** — `expo audit` spawns a single exploration-mode
+  agent with no constrained output, writes findings to markdown,
+  no code changes. Designed for "tell me what's wrong" when you
+  can't formulate the question yet.
+
+### Methodology caveats worth knowing
+
+For anyone using refine as a research tool (e.g. evaluating a
+codebase, comparing refactor approaches, etc.) — a few things to
+be honest about:
+
+1. **Convergence across runs is the mode, not the measurement.**
+   If iter-1 on five independent runs all find the same bug, that's
+   consistent with (a) it being a real bug AND (b) the rubric
+   steering strongly. Both are true; neither eliminates the other.
+   Don't use refine output as independent evidence — treat it as
+   systematic inspection under a single lens.
+
+2. **Repeat-run variance is a weak but real signal.** Temperature
+   isn't zero. If five fresh runs on the same codebase + same
+   rubric produce noticeably different iter-1 attempts, the model's
+   prior is weak here — probably because the "validation gap"
+   surface is small and the agent has to reach. If all five
+   converge, the prior is strong — probably because the issue is
+   genuinely salient.
+
+3. **Cross-model convergence is a stronger signal.** If running the
+   same rubric on the same code with Opus vs Sonnet vs Codex all
+   produce similar proposals, that's closer to independent
+   confirmation. Different training regimes, different priors,
+   same output shape = the code pattern is really there. Not
+   currently easy to do in expo; would require running refine with
+   `--agent claude-opus`, then `--agent codex`, etc., with state
+   reset between.
+
+4. **Rubric-comparison reveals what the rubric is actually aimed
+   at.** If you run rubric A and rubric B on the same code and
+   get *very different* keeps, the rubrics are doing real work.
+   If they overlap heavily, one rubric is probably dominant
+   (likely the model's own prior is overriding both and picking
+   its preferred target).
+
+### What this means for expo's design
+
+Mostly: **don't try to make refine do both jobs.** It's a
+convergent-brief inspection tool. That's a real thing. The
+ecosystem around it (race, workflow, audit) already covers the
+divergent-exploration jobs. The honest documentation move is to
+say THIS IS WHAT IT IS, and point users at the right tool for the
+other job.
+
+If there's ever an itch to build divergent-refine, some sketches:
+- **`refine --parallel-rubrics RUBRIC1 RUBRIC2 RUBRIC3`** —
+  each iteration spawns three agents in parallel, each with a
+  different rubric, keeps whichever passes gates. Race-inside-refine.
+- **`refine --rubric-rotation`** — cycle through a rubric list
+  across iterations. iter-1 uses rubric A, iter-2 uses B, etc.
+  Keeps convergence within each rubric class but diverges across.
+- **`refine --explore`** — special mode where the rubric is
+  deliberately loose ("find something worth fixing") and the
+  keep/discard decision is made by a separate judge agent
+  reviewing a pool of proposals at once, picking the K most
+  interesting. Essentially a generate-then-judge loop.
+
+None of these are on the roadmap. Flagging them because the
+vocabulary ("convergent" vs "divergent" refine) might prove useful
+if patterns we haven't thought of emerge.
+
+---
+
 ## Why this is interesting
 
 Most "AI coding" tools are either:

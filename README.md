@@ -31,6 +31,7 @@ trade some agent autonomy for output-quality guarantees.
 - **Anything needing runtime / integration / staging signal** — if the real validation requires production traffic, the loop can't help
 - **Value judgments** — "should we use library A or B?" has no objective gate answer
 - **Creative design** — do the invention work by hand, then use the loop for polish
+- **Divergent exploration / finding new bug classes** — refine is a convergent tool. Same rubric + similar codebase = similar output across runs, by design. For "tell me what's wrong when I can't formulate the question yet," reach for `expo audit` (single exploration-mode agent writes ranked findings to markdown) or `expo race` (parallel approaches, judge picks winner). See [refine-philosophy.md](.brief/refine-philosophy.md#convergent-vs-divergent-briefs--both-valid-different-purposes) for the convergent-vs-divergent framing.
 
 See **[.brief/refine-philosophy.md](.brief/refine-philosophy.md)** for
 the full conceptual model (rubric-as-soft-gate, cost-per-keep, the
