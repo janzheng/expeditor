@@ -81,11 +81,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 - [x] [fixed 2026-04-12: findScopeViolations now exempts 12 lockfile names across ecosystems. Covered by +5 scope tests. Validated live during cleanup-2 session — iters that auto-updated deno.lock no longer got wrongly discarded] Scope check wrongly flagged lockfiles — toolchain side-effects counted as scope violations #bug #scope
 
-- [ ] Concurrency semaphore on fan-outs (race/workflow/mxit/spawn-all) #safety #agentic-ux #future
-  - [*] Currently no limit — unbounded Promise.allSettled across 3 paths (orchestrator.ts:347, mxit-runner.ts:442, workflow.ts:332). 1000 ready mxit tasks = 1000 concurrent claude processes. Today the only defenses are reactive: costGuard kills agents over budget, maxToolCalls kills per-agent thrashers.
-  - [*] Fix: ConcurrencyLimit class in src/concurrency.ts with acquire/release semaphore. Wrap FULL lifecycle (spawn + wait), not just wait — otherwise pre-allocating 1000 worktrees + network connections before ANY agents start.
-  - [*] Surface: --max-concurrent N CLI flag on race, workflow, mxit, spawn-all. Default 5 (matches refine's subagent recommendation).
-  - [*] Rationale: user explicitly flagged during session — "is there some kind of async sema that prevents 1000 agents." No. This is a real safety-rail gap.
+- [x] [fixed 2026-04-12: src/concurrency.ts ConcurrencyLimit + DEFAULT_MAX_CONCURRENT=5; wired into race/workflow/mxit's processBatch (full spawn+wait lifecycle per slot); --max-concurrent N CLI flag on all three; 36 unit tests in tests/test-concurrency.ts] Concurrency semaphore on fan-outs (race/workflow/mxit) #safety #agentic-ux
 
 - [ ] Diff-based agent-touched-paths misses files from prior discarded iterations #bug #refine
   - [*] cleanup-2 iter-3 self-discarded but left tests/test-run-stats-cache.ts in the working tree. Iter-4's pre-spawn listDirtyPaths saw the file as already-dirty, so when iter-4 legitimately recreated it, the file was filtered out of agentTouchedPaths. Ended up committed-loose (had to manually stage).

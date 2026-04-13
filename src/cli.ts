@@ -651,6 +651,7 @@ async function cmdRace(args: string[]): Promise<void> {
   let model: string | undefined;
   let timeout: number | undefined;
   let snapshotDir: string | undefined;
+  let maxConcurrent: number | undefined;
 
   let i = 0;
   while (i < args.length) {
@@ -660,6 +661,7 @@ async function cmdRace(args: string[]): Promise<void> {
     if (args[i] === "--model" && args[i + 1]) { model = args[++i]; i++; continue; }
     if (args[i] === "--timeout" && args[i + 1]) { timeout = parseIntArg("--timeout", args[++i]); i++; continue; }
     if (args[i] === "--snapshot-dir" && args[i + 1]) { snapshotDir = args[++i]; i++; continue; }
+    if (args[i] === "--max-concurrent" && args[i + 1]) { maxConcurrent = parseIntArg("--max-concurrent", args[++i], { min: 1 }); i++; continue; }
     prompts.push(args[i]);
     i++;
   }
@@ -687,7 +689,7 @@ async function cmdRace(args: string[]): Promise<void> {
   console.log(`  Log: ${logFile}`);
   console.log("");
 
-  const result = await race(bus, spawner, { prompts, criteria, name, model, timeout, snapshotDir });
+  const result = await race(bus, spawner, { prompts, criteria, name, model, timeout, snapshotDir, maxConcurrent });
   await bus.close();
 
   console.log("");
@@ -794,6 +796,7 @@ async function cmdWorkflow(args: string[]): Promise<void> {
   let dryRun = false;
   let sandboxOverride: string | undefined;
   let timeout: number | undefined;
+  let maxConcurrent: number | undefined;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--model" && args[i + 1]) model = args[++i];
@@ -802,6 +805,7 @@ async function cmdWorkflow(args: string[]): Promise<void> {
     else if (args[i] === "--dry-run") dryRun = true;
     else if (args[i] === "--sandbox" && args[i + 1]) sandboxOverride = args[++i];
     else if (args[i] === "--timeout" && args[i + 1]) timeout = parseIntArg("--timeout", args[++i]);
+    else if (args[i] === "--max-concurrent" && args[i + 1]) maxConcurrent = parseIntArg("--max-concurrent", args[++i], { min: 1 });
   }
 
   // Parse the workflow for display
@@ -852,6 +856,7 @@ async function cmdWorkflow(args: string[]): Promise<void> {
     sandboxOverride,
     timeout,
     ledger,
+    maxConcurrent,
   });
 
   // Aggregate all denials from agent results into ledger
@@ -911,6 +916,7 @@ async function cmdMxit(args: string[]): Promise<void> {
   let budget = 10;
   let sandbox = "developer";
   let snapshotDir: string | undefined;
+  let maxConcurrent: number | undefined;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--agent" && args[i + 1]) agent = args[++i] as AgentType;
@@ -921,6 +927,7 @@ async function cmdMxit(args: string[]): Promise<void> {
     else if (args[i] === "--budget" && args[i + 1]) budget = parseFloat(args[++i]);
     else if (args[i] === "--sandbox" && args[i + 1]) sandbox = args[++i];
     else if (args[i] === "--snapshot-dir" && args[i + 1]) snapshotDir = args[++i];
+    else if (args[i] === "--max-concurrent" && args[i + 1]) maxConcurrent = parseIntArg("--max-concurrent", args[++i], { min: 1 });
   }
 
   const ledger = await loadLedger();
@@ -946,6 +953,7 @@ async function cmdMxit(args: string[]): Promise<void> {
     onSignal: printSignal,
     ledger,
     snapshotDir,
+    maxConcurrent,
   });
 
   console.log("");

@@ -14,6 +14,7 @@ import { AgentSpawner, type SpawnOptions, type SandboxConfig, type AgentType, SA
 import { Registry } from "./registry.ts";
 import { spawnAndWait, costGuard, type SpawnResult } from "./orchestrator.ts";
 import { withTimeout } from "./timeout.ts";
+import { ConcurrencyLimit, DEFAULT_MAX_CONCURRENT } from "./concurrency.ts";
 import type { PermissionLedger } from "./permission-ledger.ts";
 
 // --- Types ---
@@ -257,6 +258,10 @@ export interface WorkflowRunnerOptions {
   timeout?: number;
   /** Permission ledger for tracking denials and merging approvals */
   ledger?: PermissionLedger;
+  /** Max concurrent agents alive in this workflow. Default 5.
+   *  A workflow spec with 20 agents still runs — the first 5 start
+   *  immediately, the rest wait for slots to free up. */
+  maxConcurrent?: number;
 }
 
 export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<WorkflowResult> {
@@ -325,12 +330,19 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
     }
   });
 
-  const spawnedAgents = await spawner.spawnAll(spawnOpts);
-
-  // Wait for all to complete (with timeout protection)
+  // Concurrency-limited lifecycle: each workflow agent spawns and runs
+  // inside one semaphore slot. A spec with 20 agents and default max=5
+  // will see the first 5 running immediately, the rest queued. Prevents
+  // fork-bomb shape when workflows grow large.
   const timeoutMs = (opts.timeout ?? 600) * 1000;
+  const limit = new ConcurrencyLimit(opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
   const settledResults = await Promise.allSettled(
-    spawnedAgents.map((a) => withTimeout(a.process, a.done, { timeoutMs })),
+    spawnOpts.map((sopts) =>
+      limit.run(async () => {
+        const agent = await spawner.spawn(sopts);
+        return withTimeout(agent.process, agent.done, { timeoutMs });
+      }),
+    ),
   );
 
   costUnsub();
@@ -339,7 +351,7 @@ export async function runWorkflow(opts: WorkflowRunnerOptions): Promise<Workflow
   const agentResults: AgentResult[] = [];
   let totalCost = 0;
 
-  for (let i = 0; i < spawnedAgents.length; i++) {
+  for (let i = 0; i < spec.agents.length; i++) {
     const settled = settledResults[i];
     const name = spec.agents[i].name;
 

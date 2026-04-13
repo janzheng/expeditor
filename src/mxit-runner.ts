@@ -21,6 +21,7 @@ import { AgentSpawner, type SpawnOptions, type AgentType, type SandboxConfig, SA
 import { Registry } from "./registry.ts";
 import { withTimeout } from "./timeout.ts";
 import { costGuard } from "./orchestrator.ts";
+import { ConcurrencyLimit, DEFAULT_MAX_CONCURRENT } from "./concurrency.ts";
 import type { PermissionLedger } from "./permission-ledger.ts";
 // Lazy-loaded snapshot functions — avoids hard dependency on @snapshot/core
 async function loadSnapshot() {
@@ -60,6 +61,11 @@ export interface MxitRunnerOptions {
   ledger?: PermissionLedger;
   /** Directory to snapshot before each task (restore on failure) */
   snapshotDir?: string;
+  /** Max concurrent agents alive at once in parallel mode. Default 5.
+   *  A TASKS.md with 50 ready tasks still runs — excess tasks wait
+   *  for a slot. Prevents the "1000 ready = 1000 Claude processes"
+   *  scenario. Only applies when `parallel: true`. */
+  maxConcurrent?: number;
 }
 
 export interface MxitRunResult {
@@ -241,10 +247,12 @@ export async function runMxit(opts: MxitRunnerOptions): Promise<MxitRunResult> {
       }
 
       if (parallel && ready.length > 1) {
-        // Fan-out: process all ready tasks in parallel
+        // Fan-out: process all ready tasks in parallel, but cap concurrent
+        // lifecycles via ConcurrencyLimit inside processBatch.
         const batch = ready.slice(0, maxTasks - processed);
         const batchResults = await processBatch(
-          batch, tasksFile, bus, spawner, { agent, model, timeout, worktree, sandbox, ledger, snapshotDir },
+          batch, tasksFile, bus, spawner,
+          { agent, model, timeout, worktree, sandbox, ledger, snapshotDir, maxConcurrent: opts.maxConcurrent },
         );
         results.push(...batchResults);
         totalCost += batchResults.reduce((sum, r) => sum + r.costUsd, 0);
@@ -295,6 +303,8 @@ interface ProcessOpts {
   sandbox: string | SandboxConfig;
   ledger?: PermissionLedger;
   snapshotDir?: string;
+  /** Max concurrent agents alive in this batch. Default 5. */
+  maxConcurrent?: number;
 }
 
 /**
@@ -408,15 +418,12 @@ async function processBatch(
     console.log(`[mxit] Claimed: line ${task.line} → ${task.description.slice(0, 60)}`);
   }
 
-  // Spawn all agents
-  const spawnedAgents = [];
+  // Subscribe cost trackers up front — the bus emits cost signals
+  // keyed on the predictable `mxit-${task.line}` agentId, so we can
+  // set up listeners before any spawn happens.
   const costTrackers = new Map<string, { tracker: { cost: number }; unsub: () => void }>();
-
   for (const task of tasks) {
     const agentId = `mxit-${task.line}`;
-    const prompt = buildTaskPrompt(task, tasksFile);
-    const useWorktree = opts.worktree ?? (opts.agent === "claude");
-
     const tracker = { cost: 0 };
     const unsub = bus.subscribe((signal) => {
       if (signal.agentId !== agentId) return;
@@ -425,25 +432,38 @@ async function processBatch(
       }
     });
     costTrackers.set(agentId, { tracker, unsub });
-
-    const agent = await spawner.spawn({
-      prompt,
-      name: agentId,
-      agent: opts.agent,
-      model: opts.model,
-      worktree: useWorktree,
-      sandbox: opts.sandbox,
-    });
-    spawnedAgents.push({ task, agent, agentId });
   }
 
-  // Wait for all with timeout
+  // Concurrency-limited lifecycle: each task spawns and waits inside
+  // one semaphore slot. With 100 ready tasks + default max=5, only 5
+  // Claude processes are alive at any moment; the other 95 wait their
+  // turn. Prevents the "fan-out = fork bomb" failure mode.
   const timeoutMs = opts.timeout * 1000;
+  const limit = new ConcurrencyLimit(opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
+  const useWorktree = opts.worktree ?? (opts.agent === "claude");
+
   const settled = await Promise.allSettled(
-    spawnedAgents.map(({ agent }) =>
-      withTimeout(agent.process, agent.done, { timeoutMs })
+    tasks.map((task) =>
+      limit.run(async () => {
+        const agentId = `mxit-${task.line}`;
+        const prompt = buildTaskPrompt(task, tasksFile);
+        const agent = await spawner.spawn({
+          prompt,
+          name: agentId,
+          agent: opts.agent,
+          model: opts.model,
+          worktree: useWorktree,
+          sandbox: opts.sandbox,
+        });
+        return withTimeout(agent.process, agent.done, { timeoutMs });
+      }),
     ),
   );
+
+  // Rebuild the {task, agentId} zip for downstream result collection —
+  // we no longer keep a spawnedAgents array since spawns happen inside
+  // the limit and aren't all complete when we start collecting.
+  const spawnedAgents = tasks.map((task) => ({ task, agentId: `mxit-${task.line}` }));
 
   // Collect results and update TASKS.md
   const results: TaskResult[] = [];

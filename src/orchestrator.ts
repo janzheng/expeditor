@@ -13,6 +13,7 @@ import type { AgentSignal } from "./types.ts";
 import { SignalBus } from "./bus.ts";
 import { AgentSpawner, type SpawnOptions, type AgentType } from "./spawner.ts";
 import { withTimeout } from "./timeout.ts";
+import { ConcurrencyLimit, DEFAULT_MAX_CONCURRENT } from "./concurrency.ts";
 import type { PermissionLedger } from "./permission-ledger.ts";
 import type { DenialDetail } from "./types.ts";
 // Lazy-loaded snapshot functions — only resolved when snapshotDir is provided.
@@ -245,6 +246,11 @@ export interface RaceOptions {
   timeout?: number;
   /** Directory to snapshot before race, restore winner's state after */
   snapshotDir?: string;
+  /** Max concurrent branches alive at once. Default 5. A race with
+   *  `prompts.length > maxConcurrent` still runs — excess branches
+   *  wait for a slot. Prevents the "1000 tasks = 1000 claude processes"
+   *  scenario. */
+  maxConcurrent?: number;
 }
 
 export interface RaceResult {
@@ -334,7 +340,7 @@ export async function race(
     agentTrackers.set(agentId, { tracker, unsub });
   }
 
-  // Spawn all branches in parallel
+  // Build spawn specs. Each branch gets its own worktree when claude+worktree.
   const spawnOpts: SpawnOptions[] = opts.prompts.map((prompt, i) => ({
     prompt,
     name: `${prefix}-branch-${i + 1}`,
@@ -342,18 +348,35 @@ export async function race(
     worktree: opts.worktree ?? true,
   }));
 
-  const agents = await spawner.spawnAll(spawnOpts);
+  // Run under a concurrency limit. Each branch's full lifecycle
+  // (spawn → wait) happens inside one semaphore slot, so at most
+  // `maxConcurrent` Claude processes are alive at a time even when
+  // the race is called with 50+ prompts. Parallel `agents` array
+  // stays indexed by branch so downstream output/cost collection
+  // (bus subscribers keyed on agentId) still works.
   const timeoutMs = (opts.timeout ?? 600) * 1000;
+  const limit = new ConcurrencyLimit(opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
+  const agents: Array<Awaited<ReturnType<typeof spawner.spawn>>> = new Array(spawnOpts.length);
   const results = await Promise.allSettled(
-    agents.map((a) => withTimeout(a.process, a.done, { timeoutMs })),
+    spawnOpts.map((sopts, i) =>
+      limit.run(async () => {
+        const agent = await spawner.spawn(sopts);
+        agents[i] = agent;
+        return withTimeout(agent.process, agent.done, { timeoutMs });
+      }),
+    ),
   );
 
-  // Collect outputs, costs, and unsubscribe
+  // Collect outputs, costs, and unsubscribe. Look up the tracker by
+  // the known agentId (`{prefix}-branch-{i+1}`) rather than via
+  // agents[i] — a branch whose spawn threw (rare) will have no entry
+  // in the `agents` array but the id is still predictable.
   const outputs: string[] = [];
   let totalCost = 0;
 
-  for (let i = 0; i < agents.length; i++) {
-    const entry = agentTrackers.get(agents[i].agentId);
+  for (let i = 0; i < spawnOpts.length; i++) {
+    const expectedAgentId = `${prefix}-branch-${i + 1}`;
+    const entry = agentTrackers.get(expectedAgentId);
     if (entry) {
       entry.unsub();
       outputs.push(entry.tracker.output || `Branch ${i + 1}: ${results[i].status === "fulfilled" ? "completed" : "failed"}`);
@@ -391,7 +414,10 @@ export async function race(
     // snapshot we'd take would capture the wrong files.
     const winnerIdx = successIndices[0];
     if (snap && opts.snapshotDir) {
-      const winnerWt = spawner.getRegistry().get(agents[winnerIdx].agentId)?.worktreePath;
+      // Use the predictable agentId rather than agents[i] — a branch
+      // whose spawn threw would have no entry in `agents` but its id
+      // is still `{prefix}-branch-{i+1}`. Registry lookup is by id.
+      const winnerWt = spawner.getRegistry().get(`${prefix}-branch-${winnerIdx + 1}`)?.worktreePath;
       if (winnerWt) {
         await syncWorktreeIntoDir(winnerWt, opts.snapshotDir);
         await snap.snapshot(opts.snapshotDir, {
@@ -438,7 +464,7 @@ Respond with PICK <number> (1-indexed) on the first line, followed by your reaso
   // otherwise snapshotDir is still at the pre-race baseline and we'd
   // capture the wrong files.
   if (snap && opts.snapshotDir) {
-    const winnerWt = spawner.getRegistry().get(agents[winner].agentId)?.worktreePath;
+    const winnerWt = spawner.getRegistry().get(`${prefix}-branch-${winner + 1}`)?.worktreePath;
     if (winnerWt) {
       await syncWorktreeIntoDir(winnerWt, opts.snapshotDir);
     }
