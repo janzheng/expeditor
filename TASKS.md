@@ -58,10 +58,22 @@ without waiting for an `expo cycle` command to exist.
     Review kept variants, then re-run this workflow for cycle 2."
   - Keep stage 3 as a manual step on the first template — we learn
     from it what automating the handoff would need.
-- [ ] Validate the template by running it once on a small repo
+- [x] Validate the template by running it once on a small repo
   (could be snapshot again, or a new toy repo). Verify the audit
   output is readable, synthesis produces usable rubrics, and the
   handoff to refine is natural.
+  Validated 2026-04-13 on `snapshot` (1.6k LOC). $2.40, ~4 min,
+  3 explorers + synthesis all succeeded. Synthesis clustered 54
+  findings into 3 load-bearing axes (integrity/crash-safety,
+  boundary validation/error clarity, API surface coherence) +
+  2 deferred. Rubrics are standalone, file-path-specific, have
+  explicit out-of-scope sections, and are shaped for
+  `expo refine --rubric-file`. Artifacts in
+  `snapshot/.expo/output/cycle-{synthesis,rubric-A,rubric-B,rubric-C}.md`.
+  Minor friction: 2 of 3 explorers tried `Bash(mkdir -p ...)` to
+  create output dir, got denied (harmless — Write auto-creates
+  parents). Could add mkdir to allow-list in research sandbox
+  preset, or tell agents in prompt that Write handles dir creation.
 - [x] Document the pattern in `workflows/README.md` with a 5-line
   "here's the cycle, here's how to run it" recipe.
 

@@ -85,6 +85,11 @@ Do not run `expo refine` yourself. Stage 3 is manual (see Output).
 Rubrics must be standalone markdown. Synthesis index uses headers
 per axis. Keep each rubric under 600 words.
 
+The workflow runner creates the output directory for you. Use the
+Write tool for every output file — it auto-creates parent
+directories. Do not call `mkdir` via Bash; the research sandbox
+denies it and the tool call is wasted on a permission prompt.
+
 ## output
 Write synthesis to `.expo/output/cycle-synthesis.md`. Additionally
 write one rubric file per chosen axis at `.expo/output/cycle-rubric-A.md`,
