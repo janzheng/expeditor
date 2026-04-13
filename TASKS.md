@@ -244,7 +244,9 @@ the other ten shipped same-day.
   detected language (deno_test + cargo_test). No way to opt-out per
   language. Minor UX polish if someone wants `--auto-exclude cargo`
   or similar.
-- [x] **Finding #15** (HIGH) — verdict-parse fallback too aggressive.
+- [x] **Finding #15** (P0 / SEV-1, shipped — severity called up from
+  "HIGH" to "P0" 2026-04-13 after observing it across 4 refine runs
+  on snapshot) — verdict-parse fallback too aggressive.
   Observed 2026-04-13 across two refine runs on snapshot (rubric-B
   and rubric-C): 2 of 5 iters in session 1 and 3 of 5 iters in
   session 2 were force-discarded because the agent emitted prose
@@ -295,12 +297,36 @@ the other ten shipped same-day.
   anticipated. ~20 LOC change in snapshot.ts. Punt until the new
   retry has been observed in the wild enough to know whether extra
   preservation is worth the tag-namespace cost.
-  **Observed in session 3 (post-fix):** retry fired on 4 of 5 iters
-  (the prompt hardening alone didn't drop the skip rate — if anything
-  it went up slightly, sample size permitting). All 4 retries
-  recovered `keep` at ~$0.11 each. 4 keeps from 5 iters (vs 2 in
-  pre-fix session 2). The fix is doing the work the prompt alone
-  doesn't.
+  **Observed parse-fail rate across four sessions on snapshot:**
+  S1 (pre-fix, rubric-B): 2/5 = 40%.
+  S2 (pre-fix, rubric-C): 3/5 = 60%.
+  S3 (post-fix, rubric-C): 4/5 = 80% — all recovered by retry.
+  S4 (post-fix, rubric-A): 3/6 = 50% — all recovered by retry.
+  Prompt hardening did NOT reduce the rate (if anything slightly
+  higher post-fix, within sample-size noise); the retry is doing
+  100% of the recovery.
+  **Why this is actually P0, not MEDIUM/HIGH as previously filed:**
+  the core value proposition of `expo refine` is "iterate, keep what
+  works, discard what doesn't." A bug that silently classifies ~50%
+  of successful agent work as "discarded" means half the user's
+  budget on any given run is thrown away invisibly. The tree output
+  shows plausible-looking `discarded` entries; the user has no way
+  to tell parse-fail-discards from genuine-bad-work discards; and
+  the work itself is destroyed on rollback (no tag, no reflog
+  recovery without git plumbing). That's a silent-destroy bug in
+  the primary loop — exactly the severity class where users quietly
+  stop trusting the tool. Without the fix, rubric-A would have
+  looked like 3/6 keeps instead of 6/6; user would have plausibly
+  concluded "refine doesn't converge cleanly on this codebase" and
+  moved on, never knowing the loop was healthy.
+  Earlier severity calls in this file (MEDIUM → HIGH) were under-
+  calibrated — partly because the first analysis assumed discard
+  tags preserved the work (they don't), partly because the data was
+  sparse (one session) when first called. The cumulative 4-session
+  rate is ~58% parse-fail across 21 iters; at a $0.60-1.00 per-iter
+  price that's **$12-21 of work-destroyed on a typical 21-iter run
+  without the fix**, out of ~$20-40 total spend. Fifty cents on the
+  dollar is P0 territory.
 - [x] **Finding #16** (MEDIUM) — discard cleanup wipes tracked files.
   Surfaced 2026-04-13 during session 3 api-coherence run: iter-2 hit
   a scope violation (touched README.md outside `src/**`), the force-
