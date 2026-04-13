@@ -277,6 +277,41 @@ Each iteration: agent makes ONE focused change → keeps or discards → snapsho
 
 ## Commands
 
+Grouped by which phase of a design cycle they serve. See [`.brief/design-cycle-orchestration.md`](.brief/design-cycle-orchestration.md) for the diverge → converge → diverge → converge framing that motivates this taxonomy.
+
+### Diverge — explore, find what's there
+
+Open-ended exploration. Useful when you can't yet formulate the question.
+
+| Command | Description |
+|---------|-------------|
+| `expo audit <dir>` | Findings-only audit; writes `.brief/audit-*.md` |
+| `expo audit <dir> --triage` | Audit + second-agent triage pass |
+| `expo race "A" vs "B"` | Parallel framings, judge picks winner |
+
+### Converge — select, filter, build
+
+Bounded improvement against an explicit rubric or gate. Useful once you know what "good" looks like.
+
+| Command | Description |
+|---------|-------------|
+| `expo refine <dir>` | Archive-based refinement loop (gates + scope + budget) |
+| `expo review <prompt>` | Review loop: work → review → gate |
+
+### Progress — work through known tasks
+
+Sequential execution when the shape of the work is already specified.
+
+| Command | Description |
+|---------|-------------|
+| `expo mxit <TASKS.md>` | Execute tasks from a task file |
+| `expo workflow <file.md>` | Run a markdown workflow (also: a cycle engine if you design the stages) |
+| `expo ralph "<work>" "<gate>"` | Sequential task progression |
+
+### Glue — single-shot spawns, dashboards, infrastructure
+
+The plumbing that ties phases together.
+
 | Command | Description |
 |---------|-------------|
 | `expo init` | Set up Expeditor in current project |
@@ -286,14 +321,6 @@ Each iteration: agent makes ONE focused change → keeps or discards → snapsho
 | `expo resume <id>` | Resume an agent interactively |
 | `expo fork <id>` | Fork from an agent's session state |
 | `expo cleanup --all` | Clean up finished agents' worktrees |
-| `expo review <prompt>` | Review loop: work → review → gate |
-| `expo race "A" vs "B"` | Race branches, judge picks winner |
-| `expo ralph "<work>" "<gate>"` | Sequential task progression |
-| `expo workflow <file.md>` | Run a markdown workflow |
-| `expo mxit <TASKS.md>` | Execute tasks from a task file |
-| `expo refine <dir>` | Archive-based refinement loop (gates + scope + budget) |
-| `expo audit <dir>` | Findings-only audit; writes `.brief/audit-*.md` |
-| `expo audit <dir> --triage` | Audit + second-agent triage pass |
 | `expo serve` | Web dashboard (auth-gated, 127.0.0.1 default) |
 | `expo permissions` | Manage permission ledger |
 | `expo watch <file.jsonl>` | Replay a bus log |

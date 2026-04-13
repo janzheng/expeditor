@@ -42,8 +42,10 @@ for the full framing.
 refine → review) TODAY using `expo workflow` + existing primitives,
 without waiting for an `expo cycle` command to exist.
 
-- [ ] Create `workflows/design-cycle.workflow.md` — a markdown
+- [x] Create `workflows/design-cycle.workflow.md` — a markdown
   workflow file that expresses one full design cycle:
+  (created at `workflows/templates/design-cycle.md` to match
+  existing template location convention)
   - Stage 1 (diverge): spawn `expo audit` agent, output to
     `.brief/cycle-<timestamp>-findings.md`. Agent prompt asks for
     ranked findings grouped by axis (validation, error clarity,
@@ -60,7 +62,7 @@ without waiting for an `expo cycle` command to exist.
   (could be snapshot again, or a new toy repo). Verify the audit
   output is readable, synthesis produces usable rubrics, and the
   handoff to refine is natural.
-- [ ] Document the pattern in `workflows/README.md` with a 5-line
+- [x] Document the pattern in `workflows/README.md` with a 5-line
   "here's the cycle, here's how to run it" recipe.
 
 **Effort:** ~45 min for the template + 1 validation run.
@@ -82,7 +84,7 @@ a flat list into a phase-oriented taxonomy. Same commands, same
 features — different narrative. Makes the toolkit's story coherent
 to a new reader.
 
-- [ ] Edit README.md's "When to reach for which command" section
+- [x] Edit README.md's "When to reach for which command" section
   (currently around line 150-170ish). Replace the flat list:
   ```
   expo refine <dir>       Iterative improvement against a rubric
@@ -110,10 +112,10 @@ to a new reader.
     expo spawn <prompt>   Single-task spawn
     expo serve            Dashboard
   ```
-- [ ] Add a single-sentence callout: "See `.brief/design-cycle-orchestration.md`
+- [x] Add a single-sentence callout: "See `.brief/design-cycle-orchestration.md`
   for the diverge→converge→diverge→converge framing that
   motivates this taxonomy."
-- [ ] Preserve ALL existing content (install, quick start, examples,
+- [x] Preserve ALL existing content (install, quick start, examples,
   features sections) — this is purely a reorganization of the
   "when to reach for" block.
 
