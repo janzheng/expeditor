@@ -1175,6 +1175,11 @@ async function cmdRefine(args: string[]): Promise<void> {
   // signals (deno.json / package.json / pyproject.toml / Cargo.toml / etc).
   // Explicit flags still win — --rubric / --gate override the defaults.
   let autoMode = false;
+  // --approval-hook: non-TTY approval gate. Command receives verdict JSON
+  // on stdin, returns decision on stdout. Mutually exclusive with
+  // --interactive (hook wins if both set).
+  let approvalHook: string | undefined;
+  let approvalHookTimeout: number | undefined;
   // Budget guards — previously hard-coded at $2/agent and $20 total.
   // Expose as flags so long unattended sessions don't require editing source.
   let perAgentBudget = 2.0;
@@ -1210,6 +1215,8 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--json") jsonOutput = true;
     else if (args[i] === "--event-file" && args[i + 1]) eventFile = args[++i];
     else if (args[i] === "--auto") autoMode = true;
+    else if (args[i] === "--approval-hook" && args[i + 1]) approvalHook = args[++i];
+    else if (args[i] === "--approval-hook-timeout" && args[i + 1]) approvalHookTimeout = parseIntArg("--approval-hook-timeout", args[++i], { min: 1 });
     else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
     else if (args[i] === "--scope" && args[i + 1]) scope.push(args[++i]);
@@ -1300,6 +1307,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     banner(`  Budget:     $${perAgentBudget.toFixed(2)}/agent, $${totalBudget.toFixed(2)} total`);
   }
   if (interactive) banner(`  Interactive: yes`);
+  if (approvalHook) banner(`  Approval hook: ${approvalHook.slice(0, 60)}${approvalHook.length > 60 ? "…" : ""}`);
   if (gates.length > 0) {
     banner(`  Gates:      ${gates.length} seeded on baseline`);
     for (const g of gates) {
@@ -1333,6 +1341,8 @@ async function cmdRefine(args: string[]): Promise<void> {
     allowAgentGates,
     gateTimeout,
     runTimeout,
+    approvalHook,
+    approvalHookTimeout,
     scope: scope.length > 0 ? scope : undefined,
   });
 

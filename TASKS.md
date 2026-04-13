@@ -2,9 +2,10 @@
 
 Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** v0.2.4 shipped. 19 source files, ~8,200 lines. 401+ unit tests across 19 focused test files + 19 snapshot-package tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand + `--auto` zero-config). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. Staggered kill-wave + bus drain on cost-guard overrun. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed.
+**Status:** v0.2.5 shipped. 19 source files, ~8,350 lines. 425+ unit tests across 20 focused test files + 19 snapshot-package tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand + `--auto` zero-config). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. Staggered kill-wave + bus drain on cost-guard overrun. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed.
 
 **Recent milestones:**
+- `v0.2.5` (2026-04-13) — `--approval-hook` non-TTY approval gate (oversight agents, HTTP callbacks, CI approvals)
 - `v0.2.4` (2026-04-13) — `--auto` zero-config discovery + staggered kill-wave + bus drain before cost-guard kills (3 remaining TASKS-AGENTIC-UX items)
 - `v0.2.3` (2026-04-13) — structured `--json` refine output + `--event-file` JSONL tail + fenced `<verdict>` grammar + gate-failure feedback loop + `heuristics` subcommand
 - `v0.2.2` (2026-04-13) — pre-flight `expo refine <dir> gate check` + `--run-timeout` wall-clock cap + 4 remaining TASKS-AUDIT items closed (A010/A015/A024/A025)
@@ -181,7 +182,7 @@ Audit-driven + wishlist P1s:
 ### Priority 3 — bigger lifts
 
 - [x] [shipped 2026-04-13: `expo refine <dir> --auto` + `discoverAutoDefaults(dir)` exported. Detects deno.json (tasks.test → `deno task test`; falls back to `deno check **/*.ts`), package.json (npm test, skips placeholder), pyproject.toml (→ `pytest -x`), Cargo.toml, go.mod, and Makefile `test:` target. Polyglot seeds all matching gates. Explicit --rubric/--gate still win. 33 tests in tests/test-refine-auto-discovery.ts covering each project type, polyglot, malformed-JSON graceful skip, Makefile-only fallback, Makefile-skipped-when-other-markers-present, npm placeholder skip.] `--auto` zero-config discovery mode (evo-style `/discover`) `-> TASKS-AGENTIC-UX.md` #agentic-ux #discover
-- [ ] Agent-in-loop approval (non-TTY) — callback URL / named pipe `-> TASKS-AGENTIC-UX.md` #agentic-ux
+- [x] [shipped 2026-04-13: `--approval-hook CMD` + `--approval-hook-timeout N` (default 60s). Exec's command with verdict JSON on stdin, parses stdout for {action: accept|discard|converge|quit}. Accepts JSON object OR bare token OR single-letter (a/d/c/q). Fail-open on hook error/timeout/unparseable output — logs to stderr, applies agent's verdict as fallback so unattended runs don't stall. Enables oversight agents, HTTP callbacks (via curl), and CI approvals without TTY. Mutually exclusive with --interactive (hook wins). 24 tests in tests/test-refine-approval-hook.ts.] Agent-in-loop approval (non-TTY) — callback URL / named pipe `-> TASKS-AGENTIC-UX.md` #agentic-ux
 - [ ] Resumability after crash / kill — persist per-iteration state, smoke-test recovery `-> TASKS-AGENTIC-UX.md` #resilience
 
 ## Brigade Learnings — Ported Fixes & Patterns
@@ -295,7 +296,7 @@ expo race "A" vs "B" [--criteria "..."] [--timeout N] [--snapshot-dir <dir>]
 expo ralph "<work>" "<gate>" [--max N] [--review]
 expo workflow <file.md> [--agent TYPE] [--model M] [--budget N] [--timeout N] [--sandbox S]
 expo mxit <TASKS.md> [--agent TYPE] [--parallel] [--max N] [--timeout N] [--sandbox S] [--snapshot-dir <dir>]
-expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--agent TYPE] [--timeout N] [--run-timeout N] [--json] [--event-file PATH] [--auto]
+expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--approval-hook CMD] [--agent TYPE] [--timeout N] [--run-timeout N] [--json] [--event-file PATH] [--auto]
 expo refine <dir> --tree | --status
 expo refine <dir> gate list [variant_id]
 expo refine <dir> gate check [variant_id] [--timeout MS] [--json]

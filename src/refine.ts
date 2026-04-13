@@ -44,6 +44,18 @@ export interface RefineOptions {
   branchFrom?: string;
   /** Interactive mode — human approves between iterations */
   interactive?: boolean;
+  /** Non-TTY approval hook: shell command that receives the verdict as
+   *  JSON on stdin and returns a decision JSON `{action: "accept" |
+   *  "discard" | "converge" | "quit"}` on stdout. Runs once per iteration,
+   *  mutually exclusive with `interactive` (file/callback wins).
+   *
+   *  Enables oversight agents, CI approvals, and HTTP callbacks (the
+   *  hook can be a curl invocation) without needing a TTY. */
+  approvalHook?: string;
+  /** Timeout in seconds for the approval hook. Default 60. On timeout we
+   *  accept the agent's verdict as-is (fail-open) so a misconfigured hook
+   *  doesn't permanently stall an unattended run. */
+  approvalHookTimeout?: number;
   /** Agent name prefix */
   name?: string;
   /** Model override */
@@ -116,6 +128,155 @@ interface ParsedVerdict {
 const MAX_CONSECUTIVE_DISCARDS = 3;
 const ARCHIVE_CONTEXT_COUNT = 5;
 const REFINE_MD = "REFINE.md";
+
+/**
+ * Decision returned by the approval gate (TTY prompt or hook command).
+ * "accept" — apply the agent's verdict as-is.
+ * "discard" — force the iteration to be discarded regardless of agent's call.
+ * "converge" — stop the refine loop, treating current state as converged.
+ * "quit" — same as converge semantically; kept as a distinct signal so the
+ *           reason-string can reflect "user stopped" vs "user converged".
+ */
+export type ApprovalDecision = "accept" | "discard" | "converge" | "quit";
+
+/**
+ * Run the user-provided approval hook: exec its shell command with the
+ * verdict payload as JSON on stdin, parse `{"action": ...}` from stdout.
+ *
+ * Fail-open on any error (hook crashes, times out, emits unparseable output)
+ * — returns "accept" so a misconfigured hook doesn't permanently stall an
+ * unattended run. Errors are logged so the misconfiguration is visible.
+ */
+async function runApprovalHook(
+  command: string,
+  payload: { iteration: number; verdict: { action: string; change: string; summary: string }; variantId: string },
+  opts: { timeoutMs: number },
+): Promise<ApprovalDecision> {
+  const json = JSON.stringify(payload);
+  try {
+    const proc = new Deno.Command("sh", {
+      args: ["-c", command],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    // Write payload to stdin, close it so hook can terminate cleanly
+    const writer = proc.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(json));
+    await writer.close();
+
+    // Race output against the timeout — kill the hook if it overruns so
+    // an unattended run doesn't stall indefinitely on a broken hook.
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill("SIGKILL"); } catch { /* already exited */ }
+    }, opts.timeoutMs);
+
+    let output: Deno.CommandOutput;
+    try {
+      output = await proc.output();
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (timedOut) {
+      console.error(`[refine] approval hook timed out after ${opts.timeoutMs}ms — accepting agent verdict as fallback`);
+      return "accept";
+    }
+    if (!output.success) {
+      const stderr = new TextDecoder().decode(output.stderr).slice(0, 300);
+      console.error(`[refine] approval hook exited ${output.code}${stderr ? ` — stderr: ${stderr.trim()}` : ""}`);
+      console.error(`[refine] accepting agent verdict as fallback`);
+      return "accept";
+    }
+
+    const stdout = new TextDecoder().decode(output.stdout).trim();
+    if (!stdout) {
+      console.error(`[refine] approval hook returned no output — accepting agent verdict as fallback`);
+      return "accept";
+    }
+
+    const parsed = parseApprovalOutput(stdout);
+    if (parsed === null) {
+      console.error(`[refine] approval hook output unparseable: ${stdout.slice(0, 200)} — accepting agent verdict as fallback`);
+      return "accept";
+    }
+    return parsed;
+  } catch (err) {
+    console.error(`[refine] approval hook spawn failed: ${String(err).slice(0, 200)} — accepting agent verdict as fallback`);
+    return "accept";
+  }
+}
+
+/**
+ * Parse the approval hook's stdout. Accepts two shapes for ergonomics:
+ *   1. Plain JSON object: `{"action": "accept"}` — the canonical form.
+ *   2. Bare token: `accept`, `discard`, `converge`, `quit` — for shell
+ *      one-liners like `echo discard` that don't want to emit JSON.
+ *
+ * Returns null on any unrecognized shape so the caller can fall back.
+ */
+function parseApprovalOutput(stdout: string): ApprovalDecision | null {
+  // Try JSON first
+  try {
+    const parsed = JSON.parse(stdout);
+    if (typeof parsed === "object" && parsed !== null) {
+      const action = (parsed as Record<string, unknown>).action;
+      if (typeof action === "string") {
+        const lowered = action.toLowerCase() as ApprovalDecision;
+        if (lowered === "accept" || lowered === "discard" || lowered === "converge" || lowered === "quit") {
+          return lowered;
+        }
+      }
+    }
+  } catch { /* not JSON — try token form */ }
+
+  // Bare token form
+  const token = stdout.toLowerCase().split(/\s+/)[0];
+  if (token === "accept" || token === "discard" || token === "converge" || token === "quit") {
+    return token;
+  }
+  // Common shorthand: a/d/c/q — same letters the TTY prompt accepts.
+  const choice = choiceToDecision(token);
+  if (choice !== "accept" || token === "a" || token === "accept") return choice;
+  return null;
+}
+
+/** Shared mapping from one-letter / word input → ApprovalDecision.
+ *  Used by both the TTY path (--interactive) and the hook's bare-token
+ *  fallback parse so both flavors accept the same vocabulary. */
+function choiceToDecision(choice: string): ApprovalDecision {
+  const trimmed = choice.trim().toLowerCase();
+  if (trimmed === "q" || trimmed === "quit") return "quit";
+  if (trimmed === "d" || trimmed === "discard") return "discard";
+  if (trimmed === "c" || trimmed === "converge" || trimmed === "converged") return "converge";
+  // "a", "accept", empty, anything else → accept (matches prior TTY default)
+  return "accept";
+}
+
+/** Apply an ApprovalDecision to a ParsedVerdict in place. Extracted so the
+ *  TTY and hook paths share the same semantics — no drift between the two. */
+function applyApprovalDecision(verdict: ParsedVerdict, decision: ApprovalDecision): void {
+  if (decision === "quit") {
+    verdict.action = "converged";
+    verdict.summary = "User/hook stopped refinement via approval gate";
+  } else if (decision === "discard") {
+    verdict.action = "discard";
+    if (!verdict.summary) verdict.summary = "Approval gate overrode to discard";
+  } else if (decision === "converge") {
+    verdict.action = "converged";
+    if (!verdict.summary) verdict.summary = "Approval gate declared convergence";
+  }
+  // accept → keep verdict as-is
+}
+
+/** Exported for unit tests so we can exercise the parser without actually
+ *  spawning shell commands. */
+export function _testOnlyParseApprovalOutput(stdout: string): ApprovalDecision | null {
+  return parseApprovalOutput(stdout);
+}
 
 /** Read a single line from stdin (for interactive mode) */
 async function readStdinLine(): Promise<string> {
@@ -291,8 +452,21 @@ export async function refine(
       refineSummary: verdict.summary,
     });
 
-    // Interactive mode: prompt human for approval
-    if (opts.interactive) {
+    // Approval gate: either interactive (TTY) or hook (non-TTY). Hook wins
+    // if both set — non-TTY is the more deliberate configuration.
+    if (opts.approvalHook) {
+      const decision = await runApprovalHook(opts.approvalHook, {
+        iteration: iterations,
+        verdict: {
+          action: verdict.action,
+          change: verdict.change,
+          summary: verdict.summary,
+        },
+        variantId: currentParentId,
+      }, { timeoutMs: (opts.approvalHookTimeout ?? 60) * 1000 });
+
+      applyApprovalDecision(verdict, decision);
+    } else if (opts.interactive) {
       console.log(`\n--- Iteration ${iterations} ---`);
       console.log(`Verdict: ${verdict.action.toUpperCase()}`);
       console.log(`Change:  ${verdict.change}`);
@@ -301,19 +475,7 @@ export async function refine(
 
       const override = await readStdinLine();
       const choice = override.trim().toLowerCase();
-
-      if (choice === "q" || choice === "quit") {
-        // User wants to stop — treat as converged
-        verdict.action = "converged";
-        verdict.summary = "User stopped refinement via interactive mode";
-      } else if (choice === "d" || choice === "discard") {
-        verdict.action = "discard";
-        if (!verdict.summary) verdict.summary = "User overrode to discard";
-      } else if (choice === "c" || choice === "converge" || choice === "converged") {
-        verdict.action = "converged";
-        if (!verdict.summary) verdict.summary = "User declared convergence";
-      }
-      // "a", "accept", or empty → keep the agent's verdict as-is
+      applyApprovalDecision(verdict, choiceToDecision(choice));
     }
 
     // d/e. Handle verdict

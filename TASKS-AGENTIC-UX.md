@@ -40,11 +40,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 - [x] [shipped 2026-04-13: `expo refine <dir> --auto` + `discoverAutoDefaults(dir)` exported. Detects deno.json (tasks.test or `deno check` fallback), package.json (npm test; skips placeholder), pyproject.toml (pytest -x), Cargo.toml (cargo test --quiet), go.mod (go test ./...), Makefile (make test — only when no other markers found). Polyglot repos seed all matching gates. Explicit --rubric and --gate flags still win. Discovery reasons printed to stderr so nothing is invisible. Rubric is generic/conservative — the real --auto value-add is the gates. 33 tests in tests/test-refine-auto-discovery.ts. README / git-log heuristics for rubric tuning deferred.] `expo refine <dir> --auto` — zero-config discovery mode #agentic-ux #discover
 
-- [ ] Agent-in-loop approval (non-TTY) #agentic-ux
-  - [*] `--interactive` reads stdin — assumes a human at terminal
-  - [*] Need programmatic version: POST verdict to callback URL OR wait on named pipe
-  - [*] Enables oversight agents approving individual variants between iterations
-  - [*] Pairs naturally with a `fold` orchestrator driving multiple expo runs
+- [x] [shipped 2026-04-13: `--approval-hook CMD` — any shell command. Receives verdict JSON on stdin, returns decision on stdout (JSON object, bare token, or single-letter). Fail-open with stderr logging on hook error/timeout/bad output (agent verdict applied) so a broken hook can't stall an unattended run. Timeout via `--approval-hook-timeout` (default 60s, fires SIGKILL). Mutually exclusive with --interactive (hook wins). Works with curl for HTTP-callback flavor, any scripting language otherwise. 24 parser tests.] Agent-in-loop approval (non-TTY) #agentic-ux
 
 ## Discovered during this session (2026-04-12)
 
