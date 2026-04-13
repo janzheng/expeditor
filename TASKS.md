@@ -244,29 +244,35 @@ the other ten shipped same-day.
   detected language (deno_test + cargo_test). No way to opt-out per
   language. Minor UX polish if someone wants `--auto-exclude cargo`
   or similar.
-- [x] **Finding #15** (MEDIUM) — verdict-parse fallback too aggressive.
-  Observed 2026-04-13 on snapshot design-cycle validation: 2 of 5
-  iterations (40%) force-discarded because the agent emitted prose
+- [x] **Finding #15** (HIGH) — verdict-parse fallback too aggressive.
+  Observed 2026-04-13 across two refine runs on snapshot (rubric-B
+  and rubric-C): 2 of 5 iters in session 1 and 3 of 5 iters in
+  session 2 were force-discarded because the agent emitted prose
   instead of the `<verdict>{...}</verdict>` JSON wrapper, despite
-  tests passing and the implementation being clean. The discarded
-  diffs are preserved as `refine/NNN` tags — recoverable via
-  `git diff main...refine/NNN` — so the work isn't *lost*, just
-  sidelined, which lowers severity from HIGH to MEDIUM. But a user
-  has to notice and manually cherry-pick to recover, and the $0.60
-  per parse-failed iteration is wasted budget on the refine loop's
-  next-variant decision (branching logic assumed discarded == bad).
+  tests passing and the implementation being clean.
+  **Severity correction (2026-04-13 post-rubric-C):** initially
+  rated MEDIUM under the assumption that discarded diffs were
+  preserved as `refine/NNN` tags and manually recoverable. That
+  assumption was WRONG — verified against `snapshot.ts:471`
+  (`discard()` records a variant in the manifest with
+  `status: "discarded"` but does NOT create a tag; the working tree
+  is rolled back via `restore()` to parent and the diff is lost).
+  Force-discards on parse-fail **destroy work permanently**. In the
+  rubric-C run we lost two on-rubric improvements that never got
+  re-attempted (a `lastKept` → `currentId` rename + test, and
+  removal of the `branch()` one-line alias across src/mod/tests/README).
+  That puts this at HIGH not MEDIUM.
   Fix direction (pair #3 + #1, skip #2):
   1. **Strengthen the prompt** first. Make the verdict-block
      requirement more explicit: sentinel-fenced, example-in-prompt,
      explicit "if you output anything after the verdict block it's
      ignored" language. Free; reduces baseline failure rate.
   2. **Retry on parse failure.** One extra cheap agent turn: "emit
-     your verdict JSON now — no other output." ~$0.05-0.10 per
+     your verdict JSON now — no other output." ~$0.05-0.15 per
      recovery, preserves the autonomy model.
   3. ~~Softer fallback / human review limbo~~ — **rejected**:
      breaks refine's fire-and-forget shape, creates messy branching
-     from limbo variants, introduces a new tree state. Work
-     preservation is already solved by the `refine/NNN` tags.
+     from limbo variants, introduces a new tree state.
   REFINE.md's session-close agent caught this itself on the
   snapshot run — see
   `snapshot/REFINE.md` and `snapshot/.brief/cycle-2026-04-13-validation/`
@@ -279,7 +285,16 @@ the other ten shipped same-day.
   calls new `retryVerdictExtraction()` helper when `parseFailed` is
   true — cheap one-shot agent (~$0.05-0.15) extracts the verdict from
   the original output's tail. 7 new unit tests in
-  `tests/test-refine-gates.ts` (36 passing, was 29).
+  `tests/test-refine-gates.ts` (36 passing, was 29). Binary at
+  `~/.deno/bin/expo` rebuilt via `deno task install` to pick up the
+  change — prior refine runs that used an outdated binary were
+  running the old (buggy) code path.
+  **Possible follow-up (not shipping yet):** consider also tagging
+  `refine/NNN` on discard as a cheap diff-preservation mechanism —
+  belt-and-suspenders against any future parse-fail class we haven't
+  anticipated. ~20 LOC change in snapshot.ts. Punt until the new
+  retry has been observed in the wild enough to know whether extra
+  preservation is worth the tag-namespace cost.
 
 ### Rainy-day: tier-4 pathological
 
