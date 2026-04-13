@@ -25,11 +25,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 ## Verification tools
 
-- [ ] `gate check` subcommand — run inherited gates without a full refine loop #agentic-ux #gates
-  - [*] `expo refine <dir> gate check [variant_id]` runs all inherited gates against current state
-  - [*] Reports per-gate pass/fail with exit code 0 (all pass) / 1 (any fail)
-  - [*] Eliminates the "trust fall" before firing a 5-minute loop that depends on them
-  - [*] Doubles as CI primitive: gate check in a pre-commit hook
+- [x] [shipped 2026-04-13: `expo refine <dir> gate check [variant_id] [--timeout MS] [--json]`. checkRefineGates runs ALL gates (no fail-fast), returns per-gate {pass, exitCode, durationMs, timedOut, source, addedBy, stderr}. --json emits structured result for orchestrators. Exit 0 all-pass / 1 any-fail. tests/test-refine-gate-check.ts — 31 checks including fail-doesn't-short-circuit, inherited-source tracking, timeout surfaces distinctly from plain exit, typo protection on unknown variant IDs.] `gate check` subcommand — run inherited gates without a full refine loop #agentic-ux #gates
 
 - [ ] Pass gate-failure context into next iteration's prompt #feedback #gates
   - [*] Currently: gate discards a variant → next agent has no memory of why → may propose same change
@@ -44,10 +40,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 ## Wall-clock safety
 
-- [ ] Per-run wall-clock timeout #safety #resilience
-  - [*] `--timeout N` is per-iteration (per-agent), not per-run
-  - [*] Add `--run-timeout N` that hard-caps total refine duration
-  - [*] On hit: return verdict `WALL_CLOCK_EXCEEDED`, attempt graceful updateRefineMd, then exit
+- [x] [shipped 2026-04-13: `--run-timeout N` flag + RefineOptions.runTimeout. Loop checks deadline between iterations, emits wall_clock_exceeded progress signal, runs updateRefineMd, returns verdict `WALL_CLOCK_EXCEEDED` with iteration count, kept/discarded counts, total cost. Per-iteration `--timeout` is auto-clamped to remaining wall-clock budget so a single stuck iteration can't drag the run past the cap by much.] Per-run wall-clock timeout #safety #resilience
 
 - [x] [fixed 2026-04-12 in 8d7f58e: costGuard now kills offending agent on per-agent overrun, kills all-running on total overrun, emits structured BudgetExceededPayload. spawner gained killAgent() + killAllRunning() using process-group kill. All 4 call sites updated to pass spawner. Fired in production during audit-cleanup session ($5.17 > $5 killed update-md agent cleanly).] Verify cost-guard actually kills vs just logs #security #budget
 

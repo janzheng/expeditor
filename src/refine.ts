@@ -52,6 +52,13 @@ export interface RefineOptions {
   agent?: AgentType;
   /** Timeout per iteration in seconds */
   timeout?: number;
+  /** Wall-clock cap for the entire refine run in seconds.
+   *  When hit, the loop stops before the next iteration, returns verdict
+   *  `WALL_CLOCK_EXCEEDED`, and still runs the REFINE.md summary. The
+   *  per-iteration `timeout` is also clamped to the remaining budget so
+   *  an in-flight iteration can't overrun the wall clock by much.
+   *  0 or undefined = no wall-clock cap (existing behaviour). */
+  runTimeout?: number;
   /** Sandbox preset */
   sandbox?: string;
   /** Initial gates to attach to the baseline variant. Inherited by all descendants.
@@ -77,7 +84,7 @@ export interface RefineOptions {
 }
 
 export interface RefineResult {
-  verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED";
+  verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED" | "WALL_CLOCK_EXCEEDED";
   iterations: number;
   totalCostUsd: number;
   keptVariants: number;
@@ -178,13 +185,49 @@ export async function refine(
   let iterations = 0;
   let finalVariantId = getLastKeptId(variants) ?? "000";
 
+  // Wall-clock budget for the whole run (if --run-timeout was passed).
+  // Per-iteration timeout is also clamped to the remaining budget so a
+  // single stuck iteration can't overrun the wall clock arbitrarily.
+  const runStartedAt = Date.now();
+  const runTimeoutMs = (opts.runTimeout ?? 0) * 1000;
+  const runDeadline = runTimeoutMs > 0 ? runStartedAt + runTimeoutMs : 0;
+
   for (let i = 0; i < maxIterations; i++) {
     iterations = i + 1;
+
+    // Wall-clock check: stop before we even start the next iteration so
+    // the orchestrating agent can reason about a clean upper bound.
+    if (runDeadline > 0 && Date.now() >= runDeadline) {
+      await emitRefineProgress(bus, prefix, iterations, `wall_clock_exceeded: ${opts.runTimeout}s`, {
+        runTimeoutSec: opts.runTimeout,
+        elapsedMs: Date.now() - runStartedAt,
+      });
+      variants = await list(dir);
+      finalVariantId = getLastKeptId(variants) ?? "000";
+      await updateRefineMd(bus, spawner, dir, variants, opts);
+      return buildResult("WALL_CLOCK_EXCEEDED", iterations - 1, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+    }
 
     // Refresh variant list
     variants = await list(dir);
     const currentParentId = getLastKeptId(variants) ?? "000";
     finalVariantId = currentParentId;
+
+    // Clamp per-iteration timeout to remaining wall-clock budget so a long
+    // single iteration can't drag the run much past --run-timeout.
+    const baseIterTimeout = opts.timeout; // seconds
+    let iterTimeout = baseIterTimeout;
+    if (runDeadline > 0) {
+      const remainingMs = Math.max(0, runDeadline - Date.now());
+      const remainingSec = Math.ceil(remainingMs / 1000);
+      if (remainingSec <= 0) {
+        // Deadline passed during prep — loop back to the wall-clock check.
+        continue;
+      }
+      iterTimeout = baseIterTimeout
+        ? Math.min(baseIterTimeout, remainingSec)
+        : remainingSec;
+    }
 
     // a. Build agent prompt
     const archiveContext = buildArchiveContext(variants);
@@ -217,7 +260,7 @@ export async function refine(
       model: opts.model,
       worktree: false,
       cwd: dir,
-      timeout: opts.timeout,
+      timeout: iterTimeout,
       sandbox: opts.sandbox,
     });
     totalCost += result.cost;
@@ -944,7 +987,7 @@ function buildSessionLog(variants: Variant[]): string {
 // ── Result builder ─────────────────────────────────────────────
 
 function buildResult(
-  verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED",
+  verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED" | "WALL_CLOCK_EXCEEDED",
   iterations: number,
   totalCostUsd: number,
   variants: Variant[],
@@ -1124,6 +1167,211 @@ export async function removeRefineGate(
     console.log(`✓ Removed gate '${name}' from [${variantId}]`);
   } catch (err) {
     console.error(`[refine] Failed to remove gate: ${String(err).slice(0, 200)}`);
+    Deno.exit(1);
+  }
+}
+
+/** Per-gate result for `checkRefineGates`. */
+export interface GateCheckResult {
+  name: string;
+  command: string;
+  source: "direct" | "inherited";
+  addedBy: string;
+  pass: boolean;
+  exitCode: number;
+  durationMs: number;
+  /** Timeout flag — pass is always false when timedOut */
+  timedOut?: boolean;
+  /** Truncated stderr for diagnostics on failure */
+  stderr?: string;
+}
+
+/**
+ * Run every inherited gate for `variantId` (default: last-kept) and return
+ * per-gate results. Unlike `runInheritedGates` (which is fail-fast for the
+ * refine loop), this runs ALL gates so callers see every failure.
+ *
+ * Used by `expo refine <dir> gate check [variant_id]` — the "verify before
+ * firing a long loop" primitive that lets an orchestrating agent trust its
+ * invariants are green before spending real tokens.
+ */
+export async function checkRefineGates(
+  dir: string,
+  variantId?: string,
+  opts?: { timeoutMs?: number },
+): Promise<GateCheckResult[]> {
+  await init(dir);
+  const variants = await list(dir);
+
+  // Caller-provided ID must exist (typo protection)
+  if (variantId && !variants.find((v) => v.id === variantId)) {
+    throw new Error(`Variant ${variantId} not found`);
+  }
+
+  // No snapshots yet → no gates to check. Return empty so orchestrators
+  // can treat "nothing to verify" as a pass instead of an error.
+  const resolvedId = variantId ?? getLastKeptId(variants);
+  if (!resolvedId) return [];
+
+  const gates = await collectGates(dir, resolvedId);
+  if (gates.length === 0) return [];
+
+  // Mark which gates are direct vs inherited for clearer reporting
+  const direct = await listGates(dir, resolvedId);
+  const directNames = new Set(direct.map((g) => g.name));
+
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
+  const results: GateCheckResult[] = [];
+
+  for (const gate of gates) {
+    const startedAt = Date.now();
+    // Single-gate run reuses the same exec path as runInheritedGates but
+    // doesn't short-circuit on first failure — we want the full picture.
+    const cmd = gate.command
+      .replaceAll("{dir}", shellEscape(dir))
+      .replaceAll("{variantId}", shellEscape(resolvedId));
+
+    const hasSetsid = await commandExists("setsid");
+    const proc = hasSetsid
+      ? new Deno.Command("setsid", {
+          args: ["sh", "-c", cmd],
+          cwd: dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn()
+      : new Deno.Command("sh", {
+          args: ["-c", cmd],
+          cwd: dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn();
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (hasSetsid) {
+        try {
+          new Deno.Command("kill", {
+            args: ["-KILL", `-${proc.pid}`],
+            stdout: "null",
+            stderr: "null",
+          }).outputSync();
+        } catch { /* group already gone */ }
+      } else {
+        try { proc.kill("SIGKILL"); } catch { /* already exited */ }
+      }
+    }, timeoutMs);
+
+    let output: Deno.CommandOutput;
+    try {
+      output = await proc.output();
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const stderrText = new TextDecoder().decode(output.stderr).slice(0, 500);
+    results.push({
+      name: gate.name,
+      command: gate.command,
+      source: directNames.has(gate.name) ? "direct" : "inherited",
+      addedBy: gate.addedBy,
+      pass: output.success && !timedOut,
+      exitCode: timedOut ? -1 : output.code,
+      durationMs: Date.now() - startedAt,
+      timedOut: timedOut || undefined,
+      stderr: !output.success || timedOut ? stderrText : undefined,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * CLI handler for `expo refine <dir> gate check [variant_id]`.
+ *
+ * Runs every inherited gate, prints a per-gate table, and exits 0 if every
+ * gate passes or 1 if any fail. This is the "pre-flight check" an
+ * orchestrating agent runs before firing a 5-minute refine loop — so a
+ * broken gate doesn't burn tokens before the first iteration even begins.
+ */
+export async function runRefineGateCheck(
+  dir: string,
+  variantId: string | undefined,
+  opts?: { timeoutMs?: number; json?: boolean },
+): Promise<void> {
+  let results: GateCheckResult[];
+  let resolvedId: string;
+
+  try {
+    await init(dir);
+    const variants = await list(dir);
+    resolvedId = variantId ?? getLastKeptId(variants) ?? "(no snapshots)";
+    results = await checkRefineGates(dir, variantId, { timeoutMs: opts?.timeoutMs });
+  } catch (err) {
+    if (opts?.json) {
+      console.log(JSON.stringify({
+        ok: false,
+        error: String(err instanceof Error ? err.message : err).slice(0, 500),
+      }));
+    } else {
+      console.error(`[refine] gate check failed: ${String(err).slice(0, 200)}`);
+    }
+    Deno.exit(1);
+  }
+
+  const passed = results.filter((r) => r.pass).length;
+  const failed = results.length - passed;
+
+  if (opts?.json) {
+    console.log(JSON.stringify({
+      ok: failed === 0,
+      variantId: resolvedId,
+      total: results.length,
+      passed,
+      failed,
+      gates: results.map((r) => ({
+        name: r.name,
+        source: r.source,
+        addedBy: r.addedBy,
+        command: r.command,
+        pass: r.pass,
+        exitCode: r.exitCode,
+        durationMs: r.durationMs,
+        timedOut: r.timedOut ?? false,
+        stderr: r.stderr,
+      })),
+    }));
+    Deno.exit(failed === 0 ? 0 : 1);
+  }
+
+  if (results.length === 0) {
+    console.log(`No gates visible to variant [${resolvedId}].`);
+    console.log(`Add one with: expo refine ${dir} gate add <variant> --name N --command C`);
+    return;
+  }
+
+  console.log(`Checking ${results.length} gate${results.length === 1 ? "" : "s"} against [${resolvedId}]:\n`);
+  for (const r of results) {
+    const mark = r.pass ? "✓" : "✗";
+    const src = r.source === "inherited" ? ` (inherited from [${r.addedBy}])` : "";
+    const timing = `${r.durationMs}ms`;
+    console.log(`  ${mark} ${r.name}${src}   ${timing}`);
+    if (!r.pass) {
+      const reason = r.timedOut ? `timeout after ${r.durationMs}ms` : `exit ${r.exitCode}`;
+      console.log(`      command: ${r.command}`);
+      console.log(`      reason:  ${reason}`);
+      if (r.stderr && r.stderr.trim()) {
+        console.log(`      stderr:  ${r.stderr.trim().split("\n").slice(0, 3).join(" | ").slice(0, 200)}`);
+      }
+    }
+  }
+
+  console.log("");
+  if (failed === 0) {
+    console.log(`All ${passed} gate${passed === 1 ? "" : "s"} pass.`);
+    Deno.exit(0);
+  } else {
+    console.log(`${failed} of ${results.length} gate${results.length === 1 ? "" : "s"} failed.`);
     Deno.exit(1);
   }
 }

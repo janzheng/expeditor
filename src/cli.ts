@@ -1127,7 +1127,7 @@ async function cmdRefine(args: string[]): Promise<void> {
   }
 
   if (!dir) {
-    console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N]");
+    console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N] [--run-timeout N]");
     console.error("                       [--gate \"name=command\"] [--allow-agent-gates] [--gate-timeout N]");
     console.error("                       [--per-agent-budget USD] [--total-budget USD] [--scope GLOB]");
     console.error("");
@@ -1154,6 +1154,7 @@ async function cmdRefine(args: string[]): Promise<void> {
   const gates: Array<{ name: string; command: string; rationale?: string }> = [];
   let allowAgentGates = false;
   let gateTimeout: number | undefined;
+  let runTimeout: number | undefined;
   // Budget guards — previously hard-coded at $2/agent and $20 total.
   // Expose as flags so long unattended sessions don't require editing source.
   let perAgentBudget = 2.0;
@@ -1185,6 +1186,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     }
     else if (args[i] === "--allow-agent-gates") allowAgentGates = true;
     else if (args[i] === "--gate-timeout" && args[i + 1]) gateTimeout = parseIntArg("--gate-timeout", args[++i]);
+    else if (args[i] === "--run-timeout" && args[i + 1]) runTimeout = parseIntArg("--run-timeout", args[++i], { min: 1 });
     else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
     else if (args[i] === "--scope" && args[i + 1]) scope.push(args[++i]);
@@ -1216,6 +1218,7 @@ async function cmdRefine(args: string[]): Promise<void> {
   console.log(`  Directory:  ${dir}`);
   console.log(`  Rubric:     ${rubric ? rubric.slice(0, 60) + (rubric.length > 60 ? "..." : "") : "(none — agent will decide)"}`);
   console.log(`  Max iter:   ${maxIterations}`);
+  if (runTimeout) console.log(`  Run cap:    ${runTimeout}s wall-clock (stops between iterations)`);
   console.log(`  Agent:      ${agent}${model ? `:${model}` : ""}`);
   if (branchFrom) console.log(`  Branch from: ${branchFrom}`);
   if (perAgentBudget !== 2.0 || totalBudget !== 20.0) {
@@ -1251,6 +1254,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     gates: gates.length > 0 ? gates : undefined,
     allowAgentGates,
     gateTimeout,
+    runTimeout,
     scope: scope.length > 0 ? scope : undefined,
   });
 
@@ -1259,7 +1263,11 @@ async function cmdRefine(args: string[]): Promise<void> {
 
   console.log("");
   console.log(`${BOLD}=== Refine Result ===${RESET}`);
-  const verdictColor = result.verdict === "CONVERGED" ? GREEN : result.verdict === "EXHAUSTED" ? RED : YELLOW;
+  const verdictColor = result.verdict === "CONVERGED"
+    ? GREEN
+    : (result.verdict === "EXHAUSTED" || result.verdict === "WALL_CLOCK_EXCEEDED")
+    ? RED
+    : YELLOW;
   console.log(`  Verdict:    ${verdictColor}${result.verdict}${RESET}`);
   console.log(`  Iterations: ${result.iterations}`);
   console.log(`  Kept:       ${result.keptVariants}`);
@@ -1299,6 +1307,7 @@ async function cmdRefineGate(args: string[]): Promise<void> {
   if (!dir || !sub) {
     console.error("Usage:");
     console.error("  expo refine <dir> gate list [variant_id]");
+    console.error("  expo refine <dir> gate check [variant_id] [--timeout MS] [--json]");
     console.error("  expo refine <dir> gate add <variant_id> --name N --command C [--rationale R]");
     console.error("  expo refine <dir> gate remove <variant_id> --name N");
     Deno.exit(1);
@@ -1308,6 +1317,26 @@ async function cmdRefineGate(args: string[]): Promise<void> {
     const variantId = args[3];
     const { showRefineGates } = await import("./refine.ts");
     await showRefineGates(dir, variantId);
+    return;
+  }
+
+  if (sub === "check") {
+    // First positional after "check" may be a variant_id OR the first flag.
+    // Treat as variant_id only when it doesn't start with "--".
+    const maybeVariant = args[3];
+    const variantId = maybeVariant && !maybeVariant.startsWith("--") ? maybeVariant : undefined;
+    const flagStart = variantId ? 4 : 3;
+    let timeoutMs: number | undefined;
+    let json = false;
+    for (let i = flagStart; i < args.length; i++) {
+      if (args[i] === "--timeout" && args[i + 1]) {
+        timeoutMs = parseIntArg("--timeout", args[++i], { min: 1 });
+      } else if (args[i] === "--json") {
+        json = true;
+      }
+    }
+    const { runRefineGateCheck } = await import("./refine.ts");
+    await runRefineGateCheck(dir, variantId, { timeoutMs, json });
     return;
   }
 
@@ -1776,6 +1805,7 @@ ${BOLD}Commands:${RESET}
   refine <dir> --tree       Show snapshot archive tree
   refine <dir> --status     Show archive summary
   refine <dir> gate list    Show gates inherited by each variant
+  refine <dir> gate check   Pre-flight: run inherited gates without a full refine loop
   refine <dir> gate add     Attach a named gate to a variant (inherits to descendants)
   refine <dir> gate remove  Remove a named gate from a variant
   audit <dir> [flags]       Findings-only audit — agent reads source, writes .brief/audit-*.md

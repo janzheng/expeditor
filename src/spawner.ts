@@ -635,37 +635,41 @@ exit 0
       }
     }
 
-    const { cmd, args, stdinPrompt } = this.buildCommand({ ...opts, sessionId, cwd, settingsPath });
-
-    // Launch the agent as a new session/process-group leader via `setsid` so
-    // child subprocesses (git, rg, curl, test runners) can be killed as a
-    // group on timeout instead of leaking. Falls back to a direct exec when
-    // setsid isn't on PATH (non-Linux/macOS envs, stripped containers).
-    const detached = await AgentSpawner.hasSetsid();
-    const spawnCmd = detached ? "setsid" : cmd;
-    const spawnArgs = detached ? [cmd, ...args] : args;
-
-    const command = new Deno.Command(spawnCmd, {
-      args: spawnArgs,
-      cwd,
-      stdin: stdinPrompt ? "piped" : "null",
-      stdout: "piped",
-      stderr: "piped",
-    });
-
+    // A025: wrap the entire pre-spawn path in try/catch so a temp sandbox
+    // settings file written by generateSettingsFile() doesn't leak when a
+    // subsequent step (buildCommand, Deno.Command construction, spawn()) fails.
+    // The previous version only cleaned up on spawn() failure.
     let process: Deno.ChildProcess;
     try {
-      process = command.spawn();
-    } catch (err) {
-      if (settingsPath) this.cleanupSettingsFile(settingsPath);
-      throw err;
-    }
+      const { cmd, args, stdinPrompt } = this.buildCommand({ ...opts, sessionId, cwd, settingsPath });
 
-    // Pipe prompt via stdin when --allowedTools is used (variadic flag eats positional args)
-    if (stdinPrompt && process.stdin) {
-      const writer = process.stdin.getWriter();
-      await writer.write(new TextEncoder().encode(stdinPrompt));
-      await writer.close();
+      // Launch the agent as a new session/process-group leader via `setsid` so
+      // child subprocesses (git, rg, curl, test runners) can be killed as a
+      // group on timeout instead of leaking. Falls back to a direct exec when
+      // setsid isn't on PATH (non-Linux/macOS envs, stripped containers).
+      const detached = await AgentSpawner.hasSetsid();
+      const spawnCmd = detached ? "setsid" : cmd;
+      const spawnArgs = detached ? [cmd, ...args] : args;
+
+      const command = new Deno.Command(spawnCmd, {
+        args: spawnArgs,
+        cwd,
+        stdin: stdinPrompt ? "piped" : "null",
+        stdout: "piped",
+        stderr: "piped",
+      });
+
+      process = command.spawn();
+
+      // Pipe prompt via stdin when --allowedTools is used (variadic flag eats positional args)
+      if (stdinPrompt && process.stdin) {
+        const writer = process.stdin.getWriter();
+        await writer.write(new TextEncoder().encode(stdinPrompt));
+        await writer.close();
+      }
+    } catch (err) {
+      if (settingsPath) await this.cleanupSettingsFile(settingsPath);
+      throw err;
     }
 
     // Register (persist to disk)
@@ -698,6 +702,10 @@ exit 0
 
     // Thrashing protection: kill agent if tool calls exceed limit
     let killedByHarness = false;
+    // A010: track harness-emitted signals so the `done` block can await them
+    // before resolving — otherwise the JSONL log may miss the failed signal
+    // if the parent exits shortly after killing the child.
+    let harnessEmitPromise: Promise<unknown> = Promise.resolve();
     const maxToolCalls = opts.maxToolCalls ?? 0;
     if (maxToolCalls > 0) {
       let toolCallCount = 0;
@@ -707,15 +715,20 @@ exit 0
           toolCallCount++;
           if (toolCallCount >= maxToolCalls) {
             console.error(`[spawner] ${agentId} hit maxToolCalls (${maxToolCalls}) — killing`);
-            this.bus.emit({
+            killedByHarness = true;
+            // Emit first, then kill — the kill is queued via .finally so the
+            // log write lands before the child's pipe closes.
+            harnessEmitPromise = this.bus.emit({
               agentId,
               sessionId,
               timestamp: Date.now(),
               type: "failed",
               payload: { error: `Agent killed: exceeded ${maxToolCalls} tool calls (thrashing protection)` },
-            }).catch(() => {}); // best-effort log write — process is being killed
-            killedByHarness = true;
-            try { process.kill("SIGTERM"); } catch { /* already dead */ }
+            }).catch((err) => {
+              console.error(`[spawner] ${agentId} harness-emit failed:`, String(err).slice(0, 200));
+            }).finally(() => {
+              try { process.kill("SIGTERM"); } catch { /* already dead */ }
+            });
             unsub();
           }
         }
@@ -762,6 +775,11 @@ exit 0
           });
         }
       }
+
+      // A010: ensure harness-emitted `failed` signal is persisted before we
+      // continue — otherwise callers that `await done` may see the agent
+      // reported "done" without the matching failed log entry.
+      await harnessEmitPromise;
 
       const newStatus = exitCode === 0 ? "done" as const : "failed" as const;
 

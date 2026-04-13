@@ -353,7 +353,9 @@ export function lineStream(
 ): ReadableStream<string> {
   const decoder = new TextDecoder();
   let buffer = "";
-  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  // A024: start as null so cancel() before start() (or after an init error)
+  // doesn't touch an uninitialized reference.
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   return new ReadableStream<string>({
     start() {
@@ -363,6 +365,10 @@ export function lineStream(
     // BUS-05: Move read loop into pull() so the stream respects backpressure.
     // pull() is only called when the downstream consumer is ready for more data.
     async pull(controller) {
+      if (!reader) {
+        controller.close();
+        return;
+      }
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -395,12 +401,16 @@ export function lineStream(
         // emit invalid data that downstream JSON.parse would choke on.
         console.error(`[lineStream] stream error:`, String(err).slice(0, 200));
         try { controller.close(); } catch { /* already closed */ }
-        reader.releaseLock();
+        try { reader.releaseLock(); } catch { /* best effort */ }
       }
     },
 
     cancel() {
-      try { reader.releaseLock(); } catch { /* reader may not be acquired yet */ }
+      // A024: reader may be null if cancel() fires before start(), e.g. a
+      // consumer immediately cancels the returned stream. Only release when
+      // we actually own the lock.
+      if (!reader) return;
+      try { reader.releaseLock(); } catch { /* best effort */ }
     },
   });
 }

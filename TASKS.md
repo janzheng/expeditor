@@ -2,9 +2,10 @@
 
 Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** v0.2.1 shipped. 19 source files, ~7,500 lines. 262+ unit tests across 14 focused test files + 19 snapshot-package tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control). Resilience guards. Concurrency semaphore on fan-outs. All 16 findings from .brief/agentic-audit.md shipped with regression tests.
+**Status:** v0.2.2 shipped. 19 source files, ~7,700 lines. 293+ unit tests across 15 focused test files + 19 snapshot-package tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check`). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed (29 fixed, 9 wontfix with rationale).
 
 **Recent milestones:**
+- `v0.2.2` (2026-04-13) — pre-flight `expo refine <dir> gate check` + `--run-timeout` wall-clock cap + 4 remaining TASKS-AUDIT items closed (A010/A015/A024/A025)
 - `v0.2.1` (2026-04-12) — concurrency semaphore on race/workflow/mxit; `--max-concurrent N` flag
 - `v0.2.0` (2026-04-12) — gate ratchet + audit command + serve auth + costGuard enforcement + SSRF + symlink + withTimeout pgid + 10 other audit fixes
 - `v0.1.0` (2026-04-01) — headless permissions, web dashboard, snapshot integration
@@ -152,8 +153,8 @@ Audit-driven P1s (see `.brief/agentic-audit.md`):
 Audit-driven + wishlist P1s:
 
 - [x] [fixed: src/orchestrator.ts costGuard now kills per-agent on overrun or all-running on total, emits structured BudgetExceededPayload; all 4 call sites updated to pass spawner] Verify cost-guard enforces (not just logs) + distinct exit code `-> .brief/agentic-audit.md` #security #budget
-- [ ] `gate check` subcommand — verify gates pass before firing a long refine loop `-> TASKS-AGENTIC-UX.md` #agentic-ux #gates
-- [ ] Per-run wall-clock timeout (`--run-timeout`) `-> TASKS-AGENTIC-UX.md` #safety #resilience
+- [x] [shipped 2026-04-13: `expo refine <dir> gate check [variant_id] [--timeout MS] [--json]`. checkRefineGates runs every inherited gate (no fail-fast), returns per-gate pass/fail/timedOut/stderr. Exits 0 all-pass / 1 any-fail. tests/test-refine-gate-check.ts (31 checks). Pre-flight primitive for orchestrating agents.] `gate check` subcommand — verify gates pass before firing a long refine loop `-> TASKS-AGENTIC-UX.md` #agentic-ux #gates
+- [x] [shipped 2026-04-13: `--run-timeout N` CLI flag on `expo refine`. RefineOptions.runTimeout (seconds) caps wall-clock. Loop checks deadline between iterations, emits wall_clock_exceeded progress signal, runs updateRefineMd, returns verdict "WALL_CLOCK_EXCEEDED". Per-iteration timeout auto-clamped to remaining budget so a stuck iteration can't overrun.] Per-run wall-clock timeout (`--run-timeout`) `-> TASKS-AGENTIC-UX.md` #safety #resilience
 - [ ] Verdict parser — fenced `<verdict>` block grammar `-> TASKS-AGENTIC-UX.md` #parsing
 
 ### Priority 2 — agentic UX wins
@@ -292,8 +293,12 @@ expo race "A" vs "B" [--criteria "..."] [--timeout N] [--snapshot-dir <dir>]
 expo ralph "<work>" "<gate>" [--max N] [--review]
 expo workflow <file.md> [--agent TYPE] [--model M] [--budget N] [--timeout N] [--sandbox S]
 expo mxit <TASKS.md> [--agent TYPE] [--parallel] [--max N] [--timeout N] [--sandbox S] [--snapshot-dir <dir>]
-expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--agent TYPE] [--timeout N]
+expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--agent TYPE] [--timeout N] [--run-timeout N]
 expo refine <dir> --tree | --status
+expo refine <dir> gate list [variant_id]
+expo refine <dir> gate check [variant_id] [--timeout MS] [--json]
+expo refine <dir> gate add <variant_id> --name N --command C [--rationale R]
+expo refine <dir> gate remove <variant_id> --name N
 expo serve [--port N] [--log <file.jsonl>]
 expo permissions [list]
 expo permissions approve <pattern> [--auto-sync]
