@@ -244,6 +244,33 @@ the other ten shipped same-day.
   detected language (deno_test + cargo_test). No way to opt-out per
   language. Minor UX polish if someone wants `--auto-exclude cargo`
   or similar.
+- [ ] **Finding #15** (MEDIUM) — verdict-parse fallback too aggressive.
+  Observed 2026-04-13 on snapshot design-cycle validation: 2 of 5
+  iterations (40%) force-discarded because the agent emitted prose
+  instead of the `<verdict>{...}</verdict>` JSON wrapper, despite
+  tests passing and the implementation being clean. The discarded
+  diffs are preserved as `refine/NNN` tags — recoverable via
+  `git diff main...refine/NNN` — so the work isn't *lost*, just
+  sidelined, which lowers severity from HIGH to MEDIUM. But a user
+  has to notice and manually cherry-pick to recover, and the $0.60
+  per parse-failed iteration is wasted budget on the refine loop's
+  next-variant decision (branching logic assumed discarded == bad).
+  Fix direction (pair #3 + #1, skip #2):
+  1. **Strengthen the prompt** first. Make the verdict-block
+     requirement more explicit: sentinel-fenced, example-in-prompt,
+     explicit "if you output anything after the verdict block it's
+     ignored" language. Free; reduces baseline failure rate.
+  2. **Retry on parse failure.** One extra cheap agent turn: "emit
+     your verdict JSON now — no other output." ~$0.05-0.10 per
+     recovery, preserves the autonomy model.
+  3. ~~Softer fallback / human review limbo~~ — **rejected**:
+     breaks refine's fire-and-forget shape, creates messy branching
+     from limbo variants, introduces a new tree state. Work
+     preservation is already solved by the `refine/NNN` tags.
+  REFINE.md's session-close agent caught this itself on the
+  snapshot run — see
+  `snapshot/REFINE.md` and `snapshot/.brief/cycle-2026-04-13-validation/`
+  for the observed behavior.
 
 ### Rainy-day: tier-4 pathological
 
