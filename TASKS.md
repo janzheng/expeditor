@@ -79,11 +79,14 @@ the other ten shipped same-day.
 
 ### Not yet validated end-to-end
 
-- [ ] Re-run Shakedown A with all fixes applied — should produce
-  CONVERGED with zero infra-failure noise and session-kept count
-  honestly reflecting whether anything keep-worthy was found.
-- [ ] Re-run Shakedown B tier-1 on snapshot — should let iter-1's
-  legitimate addGate validation keep actually survive.
+- [ ] Re-run Shakedown A with all fixes applied — optional; tier-1
+  re-run below gave equivalent end-to-end validation signal.
+- [x] **Re-run Shakedown B tier-1 on snapshot** — done 2026-04-13 evening.
+  MAX_ITERATIONS with **5 session keeps and 0 discards** (inverse of
+  v1's 0 keeps + 3 scope-violation discards). Every fix validated with
+  direct evidence. 5 keeps landed on snapshot's `master` as commit
+  `16010dc` (API-boundary validation + error clarity). See
+  `shakedown/2026-04-13-tier1-snapshot-rerun/findings.md`.
 - [ ] Shakedown B tier-2 (medium repo — `smolvm` or `tigerflare`) —
   previously blocked by #8. Now unblocked.
 

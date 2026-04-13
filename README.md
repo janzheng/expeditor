@@ -1,10 +1,52 @@
 # Expeditor
 
-**Expeditor** is a multi-agent orchestration system. It spawns coding agents (Claude Code, Codex, OpenCode, Pi-mono, or any CLI), intercepts their structured output, multiplexes everything into a signal bus, and runs workflow patterns on top — review loops, parallel races, task progression, and markdown-driven research pipelines.
+**Expeditor** is a multi-agent orchestration system. It spawns coding agents (Claude Code, Codex, OpenCode, Pi-mono, or any CLI), intercepts their structured output, multiplexes everything into a signal bus, and runs workflow patterns on top — review loops, parallel races, task progression, markdown-driven research pipelines, and **`refine`**: a bounded iteration loop that produces reviewable commits one at a time, each passing rubric + gates before it lands.
 
 The signal bus is the core primitive. Orchestrators, UIs, loggers, cost trackers, and webhook notifiers are all just consumers of the same stream.
 
 > **Named after the kitchen expeditor** — the person who stands at the pass, sees every plate, coordinates the line, and calls out when something needs attention.
+
+## What this is (and isn't)
+
+Most AI-coding tools are either **autonomous agents** that ship code you
+inspect later, or **autocomplete** that suggests code you accept immediately.
+Expo's `refine` loop is a third shape: **bounded iteration inside a
+hard-check box**. An agent proposes a change, the loop runs it through a
+rubric (soft gate) + inherited gates (hard gates) + scope enforcement,
+and either snapshots the change as a kept variant or discards it. You
+trade some agent autonomy for output-quality guarantees.
+
+### What it's good at
+
+- **API-boundary hardening** — "this exported function accepts garbage input and fails cryptically downstream" is the canonical target
+- **Error-message clarity** — consistent pattern-propagation across parallel call sites
+- **Building out missing regression tests** — the rubric can require "new test per behavioral change"
+- **Small hygiene fixes** — off-by-ones, missing awaits, wrong defaults that contradict nearby comments
+- **Unattended runs with real money caps** — `--total-budget`, `--run-timeout`, `--per-agent-budget` are hard limits that have fired in production shakedowns
+
+### What it's bad at
+
+- **Codebase-wide coordination** — "rename this type across 15 files" tends to fail gates mid-change or violate scope
+- **Cross-module architectural change** — the <40-LOC rubric pattern filters these out, and even without it the agent lacks the mental model
+- **Anything needing runtime / integration / staging signal** — if the real validation requires production traffic, the loop can't help
+- **Value judgments** — "should we use library A or B?" has no objective gate answer
+- **Creative design** — do the invention work by hand, then use the loop for polish
+
+See **[.brief/refine-philosophy.md](.brief/refine-philosophy.md)** for
+the full conceptual model (rubric-as-soft-gate, cost-per-keep, the
+s-curve shape of a healthy project), and
+**[.brief/cost-per-keep-analytics.md](.brief/cost-per-keep-analytics.md)**
+for the metric that tells you when the loop has exhausted easy wins.
+
+### Prerequisites for trusting the output
+
+`refine` filters, it doesn't decide. Three things have to be in place:
+
+1. **A tight rubric**, committed to the repo (we use `.brief/SELF-REFINE-RUBRIC.md`). The rubric is load-bearing — a looser rubric produces plausible-looking keeps that drift the codebase.
+2. **Real gates** — `deno task test`, `mypy`, `eslint --max-warnings=0`, whatever your CI runs. Gates are what make cost-per-keep a meaningful metric rather than a gambling stat.
+3. **Scope globs** (`--scope "src/**"`) — cheap force-discards catch scope creep before money is spent.
+
+Without all three, refine reduces to an expensive randomness generator. See `shakedown/2026-04-13-*/findings.md` for concrete examples of each guardrail catching real bugs in practice.
 
 ## Install
 
