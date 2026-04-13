@@ -49,10 +49,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
   - [*] Add `--run-timeout N` that hard-caps total refine duration
   - [*] On hit: return verdict `WALL_CLOCK_EXCEEDED`, attempt graceful updateRefineMd, then exit
 
-- [ ] Verify cost-guard actually kills vs just logs #security #budget
-  - [*] Self-playtest showed `[cost-guard] selfplay-iter-3: $0.7684 exceeds per-agent budget $0.75`
-  - [*] Iteration 3 STILL completed and got kept — so budget guard is advisory, not enforcing
-  - [*] Needs: explicit "budget exceeded → stop/fail" path with distinct exit code, test for it
+- [x] [fixed 2026-04-12 in 8d7f58e: costGuard now kills offending agent on per-agent overrun, kills all-running on total overrun, emits structured BudgetExceededPayload. spawner gained killAgent() + killAllRunning() using process-group kill. All 4 call sites updated to pass spawner. Fired in production during audit-cleanup session ($5.17 > $5 killed update-md agent cleanly).] Verify cost-guard actually kills vs just logs #security #budget
 
 - [ ] Resumability after a crashed or killed run #agentic-ux #resilience
   - [*] If refine dies mid-iteration (network, pkill, deno panic), what survives?

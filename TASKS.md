@@ -2,9 +2,14 @@
 
 Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** Feature complete. 18 source files, ~6,000 lines. 29 tests + 5 snapshot tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard. Snapshot integration. Resilience guards.
+**Status:** v0.2.1 shipped. 19 source files, ~7,500 lines. 262+ unit tests across 14 focused test files + 19 snapshot-package tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control). Resilience guards. Concurrency semaphore on fan-outs. All 16 findings from .brief/agentic-audit.md shipped with regression tests.
 
-**Run tests:** `bash tests/phase0/run-all.sh` (13 pass) · `bash tests/phase1-2/run-all.sh` (11 pass) · `bash tests/test-ledger-cycle.sh` (12 pass) · `bash tests/test-workflow-synthesis.sh` (5 pass) · `deno run --allow-all tests/test-domain-filter.ts` (5 pass) · `cd ../snapshot && deno task test` (5 pass)
+**Recent milestones:**
+- `v0.2.1` (2026-04-12) — concurrency semaphore on race/workflow/mxit; `--max-concurrent N` flag
+- `v0.2.0` (2026-04-12) — gate ratchet + audit command + serve auth + costGuard enforcement + SSRF + symlink + withTimeout pgid + 10 other audit fixes
+- `v0.1.0` (2026-04-01) — headless permissions, web dashboard, snapshot integration
+
+**Run tests:** See individual `tests/test-*.ts` files; each runs via `deno run --allow-all tests/<file>.ts`. Full matrix lives in TASKS-AGENTIC-UX.md and REFINE.md.
 
 **Completed work:** See [TASKS.done.md](TASKS.done.md) for Phase 0-5 archive.
 
