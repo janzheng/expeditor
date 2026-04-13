@@ -295,6 +295,40 @@ the other ten shipped same-day.
   anticipated. ~20 LOC change in snapshot.ts. Punt until the new
   retry has been observed in the wild enough to know whether extra
   preservation is worth the tag-namespace cost.
+  **Observed in session 3 (post-fix):** retry fired on 4 of 5 iters
+  (the prompt hardening alone didn't drop the skip rate — if anything
+  it went up slightly, sample size permitting). All 4 retries
+  recovered `keep` at ~$0.11 each. 4 keeps from 5 iters (vs 2 in
+  pre-fix session 2). The fix is doing the work the prompt alone
+  doesn't.
+- [x] **Finding #16** (MEDIUM) — discard cleanup wipes tracked files.
+  Surfaced 2026-04-13 during session 3 api-coherence run: iter-2 hit
+  a scope violation (touched README.md outside `src/**`), the force-
+  discard path ran `restore()` + a cleanup loop at
+  `refine.ts:1927-1936`. The loop called `Deno.remove` on every
+  `agentTouchedPath` — correct for UNTRACKED files the agent created
+  (since `git checkout tag -- .` doesn't clean untracked), but WRONG
+  for TRACKED files the agent modified: `restore()` already put them
+  back at the parent's content, and the cleanup then deleted them.
+  Working tree post-run had README.md missing despite being tracked
+  in HEAD; recovered via `git checkout HEAD -- README.md`.
+  **Severity MEDIUM:** not catastrophic (tracked files recoverable
+  from git), but silently breaks the "discard is a safe rollback"
+  invariant and confuses subsequent iters (one iter in session 3
+  self-healed src/ files via `git restore`; none noticed README).
+  Scope-violation path is the common trigger since the agent has
+  to modify an out-of-scope tracked file to violate scope.
+  **Shipped 2026-04-13:** extracted `cleanupUntrackedAgentPaths()` +
+  `listUntrackedPaths()` helpers in `refine.ts`. Cleanup now runs
+  `git ls-files --others --exclude-standard` post-restore, intersects
+  with `agentTouchedPaths`, and only removes genuinely-untracked
+  paths. Tracked-modified files are left alone (restore already
+  handled them). On `git ls-files` failure we skip cleanup entirely
+  rather than fall back to the old wipe-everything behaviour —
+  leaving untracked cruft beats destroying tracked state. 8 new unit
+  tests in `tests/test-refine-discard-cleanup.ts` (20 passing,
+  was 12), covering tracked-preserved / untracked-removed / non-git
+  safe-fallback.
 
 ### Rainy-day: tier-4 pathological
 

@@ -189,6 +189,116 @@ async function exists(dir: string, name: string): Promise<boolean> {
   }
 }
 
+// ── Finding #16: cleanupUntrackedAgentPaths leaves tracked files alone ──
+
+import {
+  cleanupUntrackedAgentPaths,
+  listUntrackedPaths,
+} from "../src/refine.ts";
+
+console.log("\nlistUntrackedPaths — returns only untracked, ignores tracked-modified:");
+{
+  const dir = await makeGitRepo();
+  try {
+    // seed.txt is committed (tracked). Modify it.
+    await Deno.writeTextFile(join(dir, "seed.txt"), "seed modified\n");
+    // Create a new file (untracked).
+    await Deno.writeTextFile(join(dir, "new.txt"), "brand new\n");
+
+    const untracked = await listUntrackedPaths(dir);
+    check("not null", untracked !== null);
+    check("includes new.txt (untracked)", untracked!.has("new.txt"));
+    check("excludes seed.txt (tracked-modified)", !untracked!.has("seed.txt"));
+  } finally {
+    await cleanup(dir);
+  }
+}
+
+console.log("\nlistUntrackedPaths — filters .expo/ and other expo-internal paths:");
+{
+  const dir = await makeGitRepo();
+  try {
+    await Deno.mkdir(join(dir, ".expo"), { recursive: true });
+    await Deno.writeTextFile(join(dir, ".expo/logs.txt"), "expo internal\n");
+    await Deno.writeTextFile(join(dir, "user.txt"), "user file\n");
+
+    const untracked = await listUntrackedPaths(dir);
+    check("includes user.txt", untracked!.has("user.txt"));
+    check("excludes .expo/logs.txt", !untracked!.has(".expo/logs.txt"));
+  } finally {
+    await cleanup(dir);
+  }
+}
+
+console.log(
+  "\nFinding #16: cleanupUntrackedAgentPaths preserves tracked-modified files:",
+);
+{
+  const dir = await makeGitRepo();
+  try {
+    // Simulate the pre-bug-fix scenario. Agent both (a) modified a tracked
+    // file and (b) created a new untracked file. Scope violation discard
+    // fires. `restore()` rewinds the tracked file to HEAD's content — then
+    // we call cleanupUntrackedAgentPaths. Without the Finding #16 fix, the
+    // tracked file would be wiped. With the fix, only the untracked file
+    // is removed.
+    //
+    // We simulate the "restore already ran" state by restoring seed.txt to
+    // its HEAD content before calling the helper.
+    await Deno.writeTextFile(join(dir, "seed.txt"), "seed\n"); // post-restore content
+    await Deno.writeTextFile(join(dir, "agent-new.txt"), "agent created this\n"); // untracked leftover
+
+    const agentTouchedPaths = ["seed.txt", "agent-new.txt"];
+    await cleanupUntrackedAgentPaths(dir, agentTouchedPaths);
+
+    check(
+      "seed.txt (tracked) NOT removed by cleanup",
+      await exists(dir, "seed.txt"),
+    );
+    const seedContent = await Deno.readTextFile(join(dir, "seed.txt"));
+    check("seed.txt content preserved (post-restore state)", seedContent === "seed\n");
+    check(
+      "agent-new.txt (untracked) removed by cleanup",
+      !(await exists(dir, "agent-new.txt")),
+    );
+  } finally {
+    await cleanup(dir);
+  }
+}
+
+console.log(
+  "\nFinding #16: cleanup is a safe no-op on empty agentTouchedPaths:",
+);
+{
+  const dir = await makeGitRepo();
+  try {
+    await Deno.writeTextFile(join(dir, "untouched.txt"), "here\n");
+    await cleanupUntrackedAgentPaths(dir, []);
+    check("untouched file still present", await exists(dir, "untouched.txt"));
+  } finally {
+    await cleanup(dir);
+  }
+}
+
+console.log(
+  "\nFinding #16: cleanup on non-git dir is a safe no-op (no wipe):",
+);
+{
+  // No git init — listUntrackedPaths returns null → helper skips cleanup
+  // entirely rather than falling back to the dangerous Deno.remove loop.
+  const dir = await Deno.makeTempDir({ prefix: "expo-finding16-" });
+  try {
+    await Deno.writeTextFile(join(dir, "important.txt"), "do not delete\n");
+    await cleanupUntrackedAgentPaths(dir, ["important.txt"]);
+    check(
+      "non-git: tracked-unknown file NOT removed (safe fallback)",
+      await exists(dir, "important.txt"),
+    );
+  } finally {
+    await cleanup(dir);
+  }
+}
+
 // ── Summary ────────────────────────────────────────────────────
 
 console.log(`\n${passed} passed, ${failed} failed`);

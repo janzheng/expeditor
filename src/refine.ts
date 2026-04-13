@@ -1921,18 +1921,23 @@ async function recordDiscardAndMaybeBranch(
   }
 
   // Belt-and-suspenders cleanup for project-git backend. `restore()` handles
-  // tracked files via `git checkout tag -- .`, but untracked files the agent
-  // created survive. Explicitly remove them so the next iteration's dirty
-  // baseline is clean. Best-effort — a failed unlink just logs.
+  // tracked files via `git checkout tag -- .` — those are back at the parent's
+  // content already. But UNTRACKED files the agent created survive `restore()`
+  // and pollute the next iteration's dirty baseline, so we clean them here.
+  //
+  // Finding #16 (2026-04-13): the prior loop called `Deno.remove` on every
+  // agent-touched path, which wiped tracked files that the agent had merely
+  // modified (restore brought them back; we then deleted them). Fix: intersect
+  // `agentTouchedPaths` with the untracked-file set from
+  // `git ls-files --others --exclude-standard` so only genuinely-untracked
+  // files get removed. Tracked-modified paths are safe.
+  //
+  // On git-unavailable (shouldn't happen on project-git — agentTouchedPaths
+  // comes from `git status` upstream, so git works here — but defend against
+  // it), we skip cleanup entirely. Leaving untracked cruft is strictly better
+  // than wiping tracked files.
   if (agentTouchedPaths && agentTouchedPaths.length > 0) {
-    for (const p of agentTouchedPaths) {
-      try {
-        await Deno.remove(`${dir}/${p}`, { recursive: true });
-      } catch {
-        // File may not exist (restore already handled it) or may be a dir
-        // that's been partially cleaned — either way, safe to ignore.
-      }
-    }
+    await cleanupUntrackedAgentPaths(dir, agentTouchedPaths);
   }
 
   await discard(dir, entry);
@@ -3040,5 +3045,70 @@ async function listDirtyPaths(dir: string): Promise<Set<string> | null> {
     return paths;
   } catch {
     return null;
+  }
+}
+
+/** List paths that git considers untracked (new files the agent created that
+ *  aren't in HEAD's tree and aren't gitignored). Used post-restore to
+ *  distinguish "agent added a file" from "agent modified a tracked file" —
+ *  only the former needs explicit cleanup, since `restore()` already handles
+ *  tracked paths via `git checkout tag -- .`.
+ *
+ *  Returns null when git is unavailable; callers must treat null as "unknown"
+ *  and skip the cleanup rather than wipe files blindly. Finding #16. */
+export async function listUntrackedPaths(dir: string): Promise<Set<string> | null> {
+  try {
+    const proc = await new Deno.Command("git", {
+      args: ["ls-files", "--others", "--exclude-standard"],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (!proc.success) return null;
+    const out = new TextDecoder().decode(proc.stdout);
+    const paths = new Set<string>();
+    for (const line of out.split("\n")) {
+      const p = line.trim();
+      if (!p) continue;
+      if (isExpoInternalPath(p)) continue;
+      paths.add(p);
+    }
+    return paths;
+  } catch {
+    return null;
+  }
+}
+
+/** Remove genuinely-untracked agent-created files from the working tree after
+ *  a discard's `restore()`. Tracked-modified files are left alone — restore()
+ *  already put them back at the parent's content, and removing them here
+ *  would destroy legitimate state (Finding #16, 2026-04-13: this path was
+ *  wiping README.md after a scope_violation discard on snapshot).
+ *
+ *  Best-effort: on git-unavailable or any remove failure, we skip rather than
+ *  wipe. Leaving an untracked file behind is annoying; wiping a tracked one
+ *  is a bug. */
+export async function cleanupUntrackedAgentPaths(
+  dir: string,
+  agentTouchedPaths: string[],
+): Promise<void> {
+  if (agentTouchedPaths.length === 0) return;
+  const untracked = await listUntrackedPaths(dir);
+  if (untracked === null) {
+    // git not answering — can't distinguish tracked from untracked safely.
+    // Prior behaviour (remove everything) was the source of Finding #16;
+    // skip entirely instead. The next iteration's dirty-baseline may be
+    // slightly polluted with whatever the agent created, but no tracked
+    // state is destroyed.
+    return;
+  }
+  for (const p of agentTouchedPaths) {
+    if (!untracked.has(p)) continue; // tracked — restore already handled it
+    try {
+      await Deno.remove(`${dir}/${p}`, { recursive: true });
+    } catch {
+      // File may already be gone (concurrent cleanup, symlink races, etc.)
+      // or may be a dir that's been partially cleaned — safe to ignore.
+    }
   }
 }
