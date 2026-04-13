@@ -1,0 +1,19 @@
+=== master HEAD at fire time ===
+f353f6f724ea4c313a10bf3ad2ea96f3b617a364
+
+=== shakedown-tier1-v2 HEAD at fire time ===
+f353f6f724ea4c313a10bf3ad2ea96f3b617a364
+
+=== expo binary version ===
+-rwxr-xr-x  1 janzheng  staff  81762866 Apr 13 11:26 /Users/janzheng/.deno/bin/expo
+
+=== fixes applied at fire time ===
+b25ca3f TASKS.md: shakedown A+B section + updated milestone
+73e200d Close out shakedown: Finding #11 + positional-eats-flag polish (7 subcommands)
+8c685f4 Fix Shakedown Finding #8: filter expo's own runtime output from agent-touched paths
+640187e Shakedown B tier-1 on snapshot — 3 new findings (#8, #9, #10, #11)
+d64b315 Fix #6 (session-delta) + document Finding #7 (snapshot commits to main)
+
+=== branches ===
+  master
+* shakedown-tier1-v2

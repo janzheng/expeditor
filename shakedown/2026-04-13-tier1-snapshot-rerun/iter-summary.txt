@@ -1,0 +1,10 @@
+[2m18:42:59[0m [1mrefine-iter-1[0m [2m💭 refine_verdict: keep — addGate rejects empty/whitespace name or command with a c...[0m
+[2m18:44:36[0m [1mrefine-iter-2[0m [2m💭 refine_verdict: keep — restore() not-found error now names the available variant...[0m
+[2m18:46:14[0m [1mrefine-iter-3[0m [2m💭 refine_verdict: keep — snapshot() validates opts.addPaths at boundary — rejects ...[0m
+[2m18:48:22[0m [1mrefine-iter-4[0m [2m💭 refine_verdict: keep — addGate not-found error now lists known variants or tells...[0m
+[2m18:49:58[0m [1mrefine-iter-5[0m [2m💭 refine_verdict: keep — listGates not-found error now lists known variants or tel...[0m
+  Verdict:    [33mMAX_ITERATIONS[0m
+  Kept:       5 this session [2m(6 lifetime)[0m
+  Discarded:  0 this session [2m(0 lifetime)[0m
+  Cost:       $3.0937
+  Duration:   549.9s
