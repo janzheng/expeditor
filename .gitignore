@@ -13,6 +13,10 @@ tests/phase1-2/results/
 .deno/
 .refine/
 
+# Claude Code agent worktrees — runtime state for per-agent git
+# worktrees, should never be tracked
+.claude/worktrees/
+
 # OS / editor junk — previously accidentally staged by refine's git add -A
 .DS_Store
 **/.DS_Store
