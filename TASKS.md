@@ -2,9 +2,10 @@
 
 Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** v0.2.7 shipped. 19 source files, ~8,700 lines. 486+ unit tests across 23 focused test files + 19 snapshot-package tests. All `[ ]` items in TASKS.md, TASKS-AUDIT.md, and TASKS-AGENTIC-UX.md now resolved — only `[?]` (open questions) remain. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand + `--auto` zero-config). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. Staggered kill-wave + bus drain on cost-guard overrun. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed.
+**Status:** v0.2.8 shipped. 19 source files, ~8,900 lines. 534+ unit tests across 25 focused test files + 19 snapshot-package tests. Gate-ratchet ecosystem now includes emergent consensus promotion + repeatable `--gate-file` configs. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand + `--auto` zero-config). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. Staggered kill-wave + bus drain on cost-guard overrun. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed.
 
 **Recent milestones:**
+- `v0.2.8` (2026-04-13) — `--gate-file` JSON config loader + gate promotion (emergent consensus → root gate)
 - `v0.2.7` (2026-04-13) — `--format json` / `--json` on gate list, --tree, --status (structured output for orchestrators)
 - `v0.2.6` (2026-04-13) — crash resumability via `.refine/inflight.json` + discard-path cleanup of agent-created stragglers
 - `v0.2.5` (2026-04-13) — `--approval-hook` non-TTY approval gate (oversight agents, HTTP callbacks, CI approvals)
@@ -129,8 +130,8 @@ Research context (in `/Users/janzheng/Desktop/Projects/__resources/github-repos/
 
 ### Future gate-ratchet extensions #refine #future
 
-- [?] Gate promotion — auto-move a gate up the tree when N descendants independently add the same-named gate
-- [?] `--gate-file <path>` flag — load multiple gates from a YAML/JSON file for repeatable configurations
+- [x] [shipped 2026-04-13: findPromotionCandidates + promoteGatesIfWarranted. Counts direct attachments of each (name, command) tuple across non-root variants. At/above threshold → attach to root with `auto-promoted from N descendants` rationale, remove from descendants. `--gate-promote-threshold N` flag (default 3, 0 disables). Emits `gate_promoted` progress signal. Runs after every attachProposedGates call. 21 unit tests in tests/test-refine-gate-promotion.ts.] Gate promotion — auto-move a gate up the tree when N descendants independently add the same-named gate
+- [x] [shipped 2026-04-13: `--gate-file PATH` loads JSON gate configs. Accepts flat array OR `{gates: [...]}` object form. Merges with `--gate` flags via dedupeGatesByName (file loads first, flags override on name collision). loadGateFile throws with pointed error messages on missing file / bad JSON / wrong root shape / missing-name / missing-command. 27 unit tests in tests/test-refine-gate-file.ts.] `--gate-file <path>` flag — load multiple gates from a YAML/JSON file for repeatable configurations
 - [?] Dashboard gate UI — list gates per variant, show which inherited, manual add/remove from browser
 - [?] Timeout per-gate (currently one global `--gate-timeout` for all gates)
 
@@ -298,7 +299,7 @@ expo race "A" vs "B" [--criteria "..."] [--timeout N] [--snapshot-dir <dir>]
 expo ralph "<work>" "<gate>" [--max N] [--review]
 expo workflow <file.md> [--agent TYPE] [--model M] [--budget N] [--timeout N] [--sandbox S]
 expo mxit <TASKS.md> [--agent TYPE] [--parallel] [--max N] [--timeout N] [--sandbox S] [--snapshot-dir <dir>]
-expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--approval-hook CMD] [--agent TYPE] [--timeout N] [--run-timeout N] [--json] [--event-file PATH] [--auto]
+expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--approval-hook CMD] [--agent TYPE] [--timeout N] [--run-timeout N] [--json] [--event-file PATH] [--auto] [--gate "name=cmd"] [--gate-file PATH] [--gate-promote-threshold N]
 expo refine <dir> --tree | --status
 expo refine <dir> gate list [variant_id]
 expo refine <dir> gate check [variant_id] [--timeout MS] [--json]

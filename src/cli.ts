@@ -1170,6 +1170,15 @@ async function cmdRefine(args: string[]): Promise<void> {
   let allowAgentGates = false;
   let gateTimeout: number | undefined;
   let runTimeout: number | undefined;
+  // --gate-file: JSON file of pre-baked gates. Merges with --gate flags;
+  // file loads first so --gate repeated on the command line overrides the
+  // file on name collision. Primary use: CI / team setups where a
+  // standard invariant set should apply across runs without 8 --gate flags.
+  let gateFile: string | undefined;
+  // --gate-promote-threshold: how many descendants must independently attach
+  // the same (name, command) gate before it's auto-promoted to root.
+  // 0 disables promotion entirely. Default: 3 (set in refine.ts).
+  let gatePromoteThreshold: number | undefined;
   // --json: emit final RefineResult as ONE JSON object on stdout.
   // Signal prints go to stderr so stdout stays parseable by orchestrators.
   let jsonOutput = false;
@@ -1216,6 +1225,8 @@ async function cmdRefine(args: string[]): Promise<void> {
     }
     else if (args[i] === "--allow-agent-gates") allowAgentGates = true;
     else if (args[i] === "--gate-timeout" && args[i + 1]) gateTimeout = parseIntArg("--gate-timeout", args[++i]);
+    else if (args[i] === "--gate-file" && args[i + 1]) gateFile = args[++i];
+    else if (args[i] === "--gate-promote-threshold" && args[i + 1]) gatePromoteThreshold = parseIntArg("--gate-promote-threshold", args[++i], { min: 0 });
     else if (args[i] === "--run-timeout" && args[i + 1]) runTimeout = parseIntArg("--run-timeout", args[++i], { min: 1 });
     else if (args[i] === "--json") jsonOutput = true;
     else if (args[i] === "--event-file" && args[i + 1]) eventFile = args[++i];
@@ -1233,6 +1244,25 @@ async function cmdRefine(args: string[]): Promise<void> {
       rubric = await Deno.readTextFile(rubricFile);
     } catch {
       console.error(`${RED}Cannot read rubric file: ${rubricFile}${RESET}`);
+      Deno.exit(1);
+    }
+  }
+
+  // --gate-file: load JSON gate configs and merge with --gate flags.
+  // Load semantics: file gates are inserted at the FRONT of the list so
+  // repeated --gate flags on the command line override on name collision
+  // (later duplicates win via dedupeGatesByName below).
+  if (gateFile) {
+    const { loadGateFile } = await import("./refine.ts");
+    try {
+      const fileGates = await loadGateFile(gateFile);
+      gates.unshift(...fileGates);
+      const { dedupeGatesByName } = await import("./refine.ts");
+      const deduped = dedupeGatesByName(gates);
+      gates.length = 0;
+      gates.push(...deduped);
+    } catch (err) {
+      console.error(`${RED}--gate-file error: ${String(err instanceof Error ? err.message : err)}${RESET}`);
       Deno.exit(1);
     }
   }
@@ -1345,6 +1375,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     gates: gates.length > 0 ? gates : undefined,
     allowAgentGates,
     gateTimeout,
+    gatePromoteThreshold,
     runTimeout,
     approvalHook,
     approvalHookTimeout,

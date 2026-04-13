@@ -81,6 +81,16 @@ export interface RefineOptions {
   allowAgentGates?: boolean;
   /** Timeout (seconds) for each gate command. Default: 60. */
   gateTimeout?: number;
+  /** Gate promotion threshold — when this many variants INDEPENDENTLY
+   *  attach the same (name, command) gate, auto-promote it to the root
+   *  variant so the whole archive inherits it going forward. Emergent
+   *  consensus ratchet: the system turns "three agents agreed this is
+   *  important" into a project-wide invariant.
+   *
+   *  Default: 3. Set to 0 to disable promotion. Requires allowAgentGates
+   *  in practice — without agent proposals, gates only arrive via CLI
+   *  flags or --gate-file, which tend to already be root-level. */
+  gatePromoteThreshold?: number;
   /** Glob patterns (relative to `dir`) defining which paths the agent is
    *  allowed to modify. If set, any iteration that touches a file outside
    *  these patterns is force-discarded before the rubric judgment even
@@ -128,6 +138,11 @@ interface ParsedVerdict {
 const MAX_CONSECUTIVE_DISCARDS = 3;
 const ARCHIVE_CONTEXT_COUNT = 5;
 const REFINE_MD = "REFINE.md";
+/** Default threshold for gate promotion: this many independent direct
+ *  attachments of the same (name, command) tuple trigger auto-promote
+ *  to root. 3 feels right — one or two attachments could be coincidence,
+ *  three is consensus. */
+const DEFAULT_GATE_PROMOTE_THRESHOLD = 3;
 
 // Resumability: per-iteration runtime state persisted under .refine/ so a
 // crashed / killed run can continue without losing its iteration budget
@@ -787,6 +802,18 @@ export async function refine(
           agentName,
           iteration: iterations,
         });
+
+        // Gate promotion: if multiple descendants independently attached the
+        // same (name, command) tuple, promote it to root. Runs after every
+        // gate-adding iteration since the same iteration's own attachments
+        // may complete a consensus that prior iterations started.
+        const promoteThreshold = opts.gatePromoteThreshold ?? DEFAULT_GATE_PROMOTE_THRESHOLD;
+        if (promoteThreshold > 0) {
+          await promoteGatesIfWarranted(bus, dir, promoteThreshold, {
+            agentName,
+            iteration: iterations,
+          });
+        }
       }
 
       // Reset consecutive discard count for this lineage
@@ -866,6 +893,147 @@ async function attachProposedGates(
     }
   }
   return added;
+}
+
+/**
+ * Count direct attachments of each (name, command) tuple across the archive
+ * and return the tuples that hit the promotion threshold.
+ *
+ * "Direct" = the gate is on the variant's own `gates` list, not inherited.
+ * (name, command) tuples are the unit of consensus — if two variants have a
+ * "tests" gate but one runs `deno test` and the other `npm test`, they're
+ * NOT the same invariant and neither should promote on their joint count.
+ * Rationales are prose and vary freely — they don't affect the tuple.
+ *
+ * Variants that already inherit the gate are EXCLUDED from the count since
+ * their descendant didn't "independently add" it — they got it for free.
+ *
+ * The root variant (000) is also excluded: if root already has the gate,
+ * there's nothing to promote. Its presence in the count would also be
+ * double-counted since inheritance originates there.
+ */
+export interface PromotionCandidate {
+  name: string;
+  command: string;
+  attachedOn: string[]; // variant IDs with direct attachment
+  representativeRationale?: string; // first non-empty rationale seen
+}
+
+export function findPromotionCandidates(
+  variants: Variant[],
+  threshold: number,
+): PromotionCandidate[] {
+  if (threshold <= 0) return [];
+  // Identify the root variant. Convention: status === "baseline" OR id === "000".
+  const root = variants.find((v) => v.status === "baseline") ?? variants[0];
+  if (!root) return [];
+
+  // Group direct gates by (name, command) tuple
+  const groups = new Map<string, PromotionCandidate>();
+  for (const v of variants) {
+    if (v.id === root.id) continue; // root doesn't vote for its own promotion
+    for (const g of v.gates ?? []) {
+      const key = `${g.name}\x00${g.command}`;
+      const existing = groups.get(key);
+      if (existing) {
+        existing.attachedOn.push(v.id);
+        if (!existing.representativeRationale && g.rationale) {
+          existing.representativeRationale = g.rationale;
+        }
+      } else {
+        groups.set(key, {
+          name: g.name,
+          command: g.command,
+          attachedOn: [v.id],
+          representativeRationale: g.rationale,
+        });
+      }
+    }
+  }
+
+  // Exclude tuples that the root variant already has (identical name+command)
+  const rootKeys = new Set(
+    (root.gates ?? []).map((g) => `${g.name}\x00${g.command}`),
+  );
+
+  return Array.from(groups.entries())
+    .filter(([key, c]) => !rootKeys.has(key) && c.attachedOn.length >= threshold)
+    .map(([, c]) => c);
+}
+
+/**
+ * If any gates have reached the consensus threshold, promote them to the
+ * root variant and remove the (now-redundant) direct attachments from
+ * descendants. Returns the number of gates promoted.
+ *
+ * Best-effort throughout — addGate/removeGate failures are logged and
+ * skipped so one bad promotion doesn't abort the rest.
+ */
+async function promoteGatesIfWarranted(
+  bus: SignalBus,
+  dir: string,
+  threshold: number,
+  ctx: { agentName: string; iteration: number },
+): Promise<number> {
+  if (threshold <= 0) return 0;
+  const variants = await list(dir);
+  const candidates = findPromotionCandidates(variants, threshold);
+  if (candidates.length === 0) return 0;
+
+  const root = variants.find((v) => v.status === "baseline") ?? variants[0];
+  if (!root) return 0;
+
+  let promoted = 0;
+  for (const c of candidates) {
+    try {
+      // Attach to root with a promotion-flavoured rationale so it's clear in
+      // `gate list` output that this wasn't a manual root gate.
+      const rationale = c.representativeRationale
+        ? `promoted from ${c.attachedOn.length} descendants; originally: ${c.representativeRationale}`
+        : `auto-promoted from ${c.attachedOn.length} descendants`;
+      await addGate(dir, root.id, {
+        name: c.name,
+        command: c.command,
+        rationale: rationale.slice(0, 400),
+      });
+
+      // Remove redundant direct attachments from descendants. They still see
+      // the gate via inheritance from root; direct copies would run the same
+      // command redundantly (collectGates dedupes by name, but storage bloat
+      // is real and confusing in `gate list`).
+      for (const variantId of c.attachedOn) {
+        try {
+          await removeGate(dir, variantId, c.name);
+        } catch {
+          // Best-effort — if removal fails, inheritance de-dup in collectGates
+          // means the runtime still behaves correctly.
+        }
+      }
+
+      promoted++;
+      await emitRefineProgress(
+        bus,
+        ctx.agentName,
+        ctx.iteration,
+        `gate_promoted: '${c.name}' → root (${c.attachedOn.length} descendants agreed)`,
+        {
+          gatePromoted: c.name,
+          gateCommand: c.command,
+          promotedFromCount: c.attachedOn.length,
+          promotedFromVariants: c.attachedOn,
+        },
+      );
+      console.log(
+        `[refine] promoted gate '${c.name}' to root — ${c.attachedOn.length} descendants independently added it`,
+      );
+    } catch (err) {
+      console.error(
+        `[refine] gate promotion failed for '${c.name}': ${String(err).slice(0, 200)}`,
+      );
+    }
+  }
+
+  return promoted;
 }
 
 // ── Gate runner ────────────────────────────────────────────────
@@ -1803,6 +1971,94 @@ export async function removeRefineGate(
     console.error(`[refine] Failed to remove gate: ${String(err).slice(0, 200)}`);
     Deno.exit(1);
   }
+}
+
+// ── Gate-file loading ──────────────────────────────────────────
+
+/** Shape accepted by `loadGateFile`. A flat array is the minimum; object
+ *  form leaves room for future metadata (e.g. `{version: 1, gates: [...]}`). */
+export type GateFileShape =
+  | Array<{ name: string; command: string; rationale?: string }>
+  | { gates: Array<{ name: string; command: string; rationale?: string }> };
+
+/**
+ * Read + validate a gate config JSON file. Used by `expo refine --gate-file
+ * PATH` to seed the baseline with a curated invariant set without eight
+ * repeated `--gate` flags.
+ *
+ * Accepts either a flat array of `{name, command, rationale?}` OR an object
+ * `{gates: [...]}` — the object form lets us add metadata later without
+ * breaking consumers.
+ *
+ * Throws with a pointed error message on: missing file, unparseable JSON,
+ * wrong root shape, or any gate missing `name`/`command`. Early throw is
+ * intentional — a typo in a gate config is the kind of silent-fail that
+ * later manifests as "why didn't my test gate run?"
+ */
+export async function loadGateFile(
+  path: string,
+): Promise<Array<{ name: string; command: string; rationale?: string }>> {
+  let raw: string;
+  try {
+    raw = await Deno.readTextFile(path);
+  } catch (err) {
+    throw new Error(`cannot read gate file ${path}: ${String(err).slice(0, 200)}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`gate file ${path} is not valid JSON: ${String(err).slice(0, 200)}`);
+  }
+
+  // Normalize both shapes to an array
+  let arr: unknown;
+  if (Array.isArray(parsed)) {
+    arr = parsed;
+  } else if (parsed && typeof parsed === "object" && Array.isArray((parsed as { gates?: unknown }).gates)) {
+    arr = (parsed as { gates: unknown[] }).gates;
+  } else {
+    throw new Error(`gate file ${path}: expected array of {name, command, rationale?} or {gates: [...]}`);
+  }
+
+  const result: Array<{ name: string; command: string; rationale?: string }> = [];
+  const rawArr = arr as unknown[];
+  for (let i = 0; i < rawArr.length; i++) {
+    const entry = rawArr[i];
+    if (typeof entry !== "object" || entry === null) {
+      throw new Error(`gate file ${path}[${i}]: expected object, got ${typeof entry}`);
+    }
+    const g = entry as Record<string, unknown>;
+    if (typeof g.name !== "string" || g.name.trim().length === 0) {
+      throw new Error(`gate file ${path}[${i}]: missing or empty "name"`);
+    }
+    if (typeof g.command !== "string" || g.command.trim().length === 0) {
+      throw new Error(`gate file ${path}[${i}] (name=${g.name}): missing or empty "command"`);
+    }
+    const gate: { name: string; command: string; rationale?: string } = {
+      name: g.name.trim(),
+      command: g.command.trim(),
+    };
+    if (typeof g.rationale === "string" && g.rationale.trim().length > 0) {
+      gate.rationale = g.rationale.trim();
+    }
+    result.push(gate);
+  }
+
+  return result;
+}
+
+/**
+ * De-duplicate a gates list by `name` — later entries win. Used after
+ * merging `--gate-file` contents with `--gate` flags so CLI flags can
+ * cleanly override the file for one-off customizations without editing
+ * the shared config.
+ */
+export function dedupeGatesByName<G extends { name: string }>(gates: G[]): G[] {
+  const byName = new Map<string, G>();
+  for (const g of gates) byName.set(g.name, g);
+  return Array.from(byName.values());
 }
 
 // ── Zero-config discovery (--auto) ─────────────────────────────
