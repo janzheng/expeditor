@@ -244,7 +244,7 @@ the other ten shipped same-day.
   detected language (deno_test + cargo_test). No way to opt-out per
   language. Minor UX polish if someone wants `--auto-exclude cargo`
   or similar.
-- [ ] **Finding #15** (MEDIUM) — verdict-parse fallback too aggressive.
+- [x] **Finding #15** (MEDIUM) — verdict-parse fallback too aggressive.
   Observed 2026-04-13 on snapshot design-cycle validation: 2 of 5
   iterations (40%) force-discarded because the agent emitted prose
   instead of the `<verdict>{...}</verdict>` JSON wrapper, despite
@@ -271,6 +271,15 @@ the other ten shipped same-day.
   snapshot run — see
   `snapshot/REFINE.md` and `snapshot/.brief/cycle-2026-04-13-validation/`
   for the observed behavior.
+  **Shipped 2026-04-13:** (1) `buildRefinePrompt` hardened — verdict
+  now has its own REQUIRED section, legacy-fallback language removed
+  from the agent-facing prompt. (2) `ParsedVerdict` gained a
+  `parseFailed` flag; `parseVerdict` sets it when neither the fenced
+  block nor the legacy line grammar matched. (3) Main refine loop
+  calls new `retryVerdictExtraction()` helper when `parseFailed` is
+  true — cheap one-shot agent (~$0.05-0.15) extracts the verdict from
+  the original output's tail. 7 new unit tests in
+  `tests/test-refine-gates.ts` (36 passing, was 29).
 
 ### Rainy-day: tier-4 pathological
 

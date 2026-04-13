@@ -181,6 +181,14 @@ interface ParsedVerdict {
   /** Any GATE_PROPOSAL lines the agent emitted. Only used when
    *  allowAgentGates is true; otherwise ignored. */
   gateProposals: GateProposal[];
+  /** True when neither the fenced `<verdict>{...}</verdict>` block nor the
+   *  legacy line grammar (`VERDICT: KEEP` etc.) could be found/parsed in
+   *  the agent's output, and the action was defaulted to "discard". Callers
+   *  may choose to spawn an extraction-retry before accepting the default —
+   *  see Finding #15 (2026-04-13 snapshot shakedown): agents doing real work
+   *  sometimes forget the verdict wrapper and get force-discarded despite
+   *  passing gates. */
+  parseFailed?: boolean;
 }
 
 // ── Constants ──────────────────────────────────────────────────
@@ -831,7 +839,36 @@ To proceed, pick one:
     consecutiveInfraFailures = 0;
 
     // f. Parse verdict
-    const verdict = parseVerdict(result.output);
+    let verdict = parseVerdict(result.output);
+
+    // Finding #15: if the agent did work but forgot the <verdict> wrapper,
+    // spawn a cheap extraction-retry before accepting the force-discard.
+    // Observed in the 2026-04-13 snapshot run at 40% parse-fail rate; the
+    // discarded work was keep-quality in both cases. A ~$0.10 retry is worth
+    // it against a $0.60-1.00 iteration that would otherwise be lost to
+    // format noise.
+    if (verdict.parseFailed) {
+      console.log(
+        `[refine] iter ${iterations}: verdict parse failed — attempting extraction retry`,
+      );
+      const retried = await retryVerdictExtraction(result.output, bus, spawner, {
+        name: `${agentName}-verdict-retry`,
+        agent: opts.agent,
+        model: opts.model,
+        cwd: dir,
+        sandbox: opts.sandbox,
+      });
+      if (retried) {
+        console.log(
+          `[refine] iter ${iterations}: extraction retry recovered verdict: ${retried.action}`,
+        );
+        verdict = retried;
+      } else {
+        console.log(
+          `[refine] iter ${iterations}: extraction retry also failed — accepting default discard`,
+        );
+      }
+    }
 
     // Emit refine_verdict signal for dashboard tracking
     await emitRefineProgress(bus, agentName, iterations, `refine_verdict: ${verdict.action} — ${verdict.change}`, {
@@ -1454,7 +1491,11 @@ export function buildRefinePrompt(ctx: PromptContext): string {
   parts.push("");
   parts.push("1. Examine the current state of the project");
   parts.push("2. Make ONE focused improvement based on the rubric");
-  parts.push("3. Output your verdict in EXACTLY this format at the END of your response:");
+  parts.push("3. End your response with the verdict block described below");
+  parts.push("");
+  parts.push("## Verdict — REQUIRED");
+  parts.push("");
+  parts.push("Your response MUST end with a `<verdict>...</verdict>` block. If you omit it, or if prose follows `</verdict>`, your iteration will be force-discarded regardless of the quality of your code changes. Do NOT narrate your verdict in prose instead of emitting the block.");
   parts.push("");
   parts.push("```");
   parts.push("<verdict>");
@@ -1469,9 +1510,12 @@ export function buildRefinePrompt(ctx: PromptContext): string {
   parts.push("</verdict>");
   parts.push("```");
   parts.push("");
-  parts.push("The `<verdict>` block must be valid JSON — no trailing commas, strings double-quoted. This is the primary grammar; the harness will fall back to the legacy line format (`VERDICT: KEEP` etc.) ONLY if the `<verdict>` block is missing or malformed, so prefer the fenced form.");
+  parts.push("Requirements:");
+  parts.push("- Valid JSON: double-quoted strings, no trailing commas, no comments.");
+  parts.push("- The block must be the LAST thing you emit. Multiple `<verdict>` blocks are tolerated (the last one wins) but prose after `</verdict>` is ignored.");
+  parts.push("- Emit the block even if you end up making no change — use `action: \"discard\"` with a summary explaining why you chose not to act.");
   parts.push("");
-  parts.push("Rules:");
+  parts.push("Action semantics:");
   parts.push("- keep: You made a change that improves the project. The change will be snapshotted.");
   parts.push("- discard: You attempted a change but it made things worse or didn't help. The change will be rolled back.");
   parts.push("- converged: The project meets the rubric criteria and no further improvements are needed.");
@@ -1580,6 +1624,7 @@ export function parseVerdict(output: string): ParsedVerdict {
   }
 
   // If no structured verdict found, default to DISCARD
+  let parseFailed = false;
   if (!action) {
     // Try to infer from the output
     const upper = output.toUpperCase();
@@ -1593,6 +1638,7 @@ export function parseVerdict(output: string): ParsedVerdict {
       if (!summary) {
         summary = "Could not parse agent verdict — defaulting to discard";
       }
+      parseFailed = true;
     }
   }
 
@@ -1601,7 +1647,9 @@ export function parseVerdict(output: string): ParsedVerdict {
     change = extractFirstMeaningfulLine(output);
   }
 
-  return { action, change, summary, gateProposals };
+  return parseFailed
+    ? { action, change, summary, gateProposals, parseFailed: true }
+    : { action, change, summary, gateProposals };
 }
 
 /**
@@ -1747,6 +1795,94 @@ function extractFirstMeaningfulLine(output: string): string {
     }
   }
   return "(no description)";
+}
+
+// ── Verdict extraction retry ───────────────────────────────────
+
+/**
+ * Spawn a tiny extraction agent to recover a verdict when the refinement
+ * agent produced real output but forgot the `<verdict>...</verdict>` wrapper.
+ * This is the Finding #15 fix: in the 2026-04-13 snapshot validation run,
+ * 2 of 5 iterations did real work (tests passed, clean implementations)
+ * but emitted their verdict as prose — the harness force-discarded them on
+ * parse failure despite the work being keep-quality.
+ *
+ * The retry is intentionally narrow: it does NOT re-read the code, run
+ * tests, or make its own judgment. It only reflects the original agent's
+ * stated view back into a parseable block. If the extraction itself also
+ * fails (malformed output, spawn error, etc.), returns null and callers
+ * fall through to the existing "defaulted to discard" behaviour.
+ *
+ * Cost: a single short agent turn, typically $0.05–0.15. Compared to the
+ * $0.50–1.00 spent on the original iteration, recovering even some of
+ * these is a large ROI lift on any multi-iter run.
+ */
+async function retryVerdictExtraction(
+  originalOutput: string,
+  bus: SignalBus,
+  spawner: AgentSpawner,
+  opts: {
+    name: string;
+    agent?: AgentType;
+    model?: string;
+    cwd: string;
+    sandbox?: string;
+  },
+): Promise<ParsedVerdict | null> {
+  // Tail-truncate: the verdict (if any trace of it exists) lives near the
+  // end of the agent's output. 4000 chars is enough to capture the last
+  // few turns' worth of prose without blowing up retry cost.
+  const tail = originalOutput.length > 4000 ? originalOutput.slice(-4000) : originalOutput;
+
+  const prompt = [
+    "A refinement agent produced the output below but did not end it with a",
+    "`<verdict>{...}</verdict>` block in the expected format. Your ONLY job is to",
+    "read what the agent said and emit the verdict block they should have emitted.",
+    "",
+    "Rules:",
+    "- Read the agent's final statements about what they changed and whether tests passed.",
+    "- If the agent indicated their change was a success (tests pass, rubric met, keep-quality), emit action=keep.",
+    "- If the agent indicated the change was a problem (tests failed, rolled back, not useful), emit action=discard.",
+    "- If the agent said the project is done / rubric fully met, emit action=converged.",
+    "- If you genuinely can't tell, emit action=discard — safe default beats a mistaken keep.",
+    "- Do NOT make your own judgment about whether the change was actually good. Reflect the agent's stated view.",
+    "- Do NOT read files, run commands, or write code. Emit the verdict block and nothing else.",
+    "",
+    "End your response with this block — exact format:",
+    "",
+    "<verdict>",
+    "{",
+    '  "action": "keep" | "discard" | "converged",',
+    '  "change": "short description of what the agent said they changed",',
+    '  "summary": "why the agent considered it a success or failure"',
+    "}",
+    "</verdict>",
+    "",
+    "--- Agent output begins (tail) ---",
+    tail,
+    "--- Agent output ends ---",
+  ].join("\n");
+
+  try {
+    const result = await spawnAndWait(bus, spawner, {
+      prompt,
+      name: opts.name,
+      agent: opts.agent,
+      model: opts.model,
+      worktree: false,
+      cwd: opts.cwd,
+      timeout: 60,
+      sandbox: opts.sandbox,
+    });
+    const parsed = parseVerdict(result.output);
+    if (parsed.parseFailed) return null;
+    return parsed;
+  } catch (err) {
+    console.error(
+      `[refine] verdict-extraction retry spawn failed: ${String(err).slice(0, 200)}`,
+    );
+    return null;
+  }
 }
 
 // ── Variant helpers ────────────────────────────────────────────

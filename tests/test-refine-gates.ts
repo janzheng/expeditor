@@ -147,6 +147,50 @@ SUMMARY: did not help
   check("proposal still parsed (loop decides what to do)", parsed.gateProposals.length === 1);
 }
 
+// ── Test 5b: Finding #15 — parseFailed flag is set when no verdict is found ──
+
+console.log("\nparseVerdict — Finding #15: parseFailed=true when no block/line found:");
+{
+  // Agent did work, narrated it in prose, but never emitted the <verdict>
+  // block or the legacy VERDICT: line. This is exactly the 2026-04-13
+  // snapshot iter-3/iter-5 failure mode.
+  const output = `
+I examined snapshot.ts and added timeoutMs validation at the boundary.
+All 31 tests pass including the new boundary test.
+The change is focused and low-risk.
+`;
+  const parsed = parseVerdict(output);
+  check("action=discard (safe default)", parsed.action === "discard");
+  check("parseFailed=true flag set", parsed.parseFailed === true);
+  check("summary mentions parse failure", parsed.summary.includes("Could not parse"));
+}
+
+console.log("\nparseVerdict — Finding #15: parseFailed is NOT set on successful fenced parse:");
+{
+  const output = `
+Did the work.
+
+<verdict>
+{"action": "keep", "change": "x", "summary": "y"}
+</verdict>
+`;
+  const parsed = parseVerdict(output);
+  check("action=keep", parsed.action === "keep");
+  check("parseFailed undefined/false", !parsed.parseFailed);
+}
+
+console.log("\nparseVerdict — Finding #15: parseFailed is NOT set on legacy line grammar:");
+{
+  const output = `
+VERDICT: KEEP
+CHANGE: small win
+SUMMARY: done
+`;
+  const parsed = parseVerdict(output);
+  check("action=keep", parsed.action === "keep");
+  check("parseFailed undefined/false", !parsed.parseFailed);
+}
+
 // ── Test 6: Integration — snapshot primitives give refine everything it needs ──
 
 console.log("\nsnapshot primitives — gates compose correctly:");
