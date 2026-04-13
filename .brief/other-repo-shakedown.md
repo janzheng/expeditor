@@ -44,7 +44,64 @@ The claim is plausible but untested. This shakedown is the test.
 
 ---
 
-## Candidate-repo selection
+## Two shakedowns, sequence matters
+
+The brief originally focused on "point at other repos" — but there's a
+more fundamental untested thing first: **true unattended on expo itself.**
+
+Every self-playtest this session was human-in-loop. I'd kick off a run,
+watch, ctrl-C when it drifted, fix, restart. A real user can't do that.
+Expo-on-expo unattended validates the UNATTENDED story without also
+testing project-shape assumptions; it isolates "does the loop self-manage"
+from "does `--auto` guess right on a foreign codebase."
+
+### Shakedown A — expo-on-expo, unattended
+
+Do this first. Expo's own tree is the repo we understand best; it's the
+clean test of whether the guardrails actually work without a watcher.
+
+```bash
+cd apps/expo
+# Start with a short unattended run — no human at the terminal
+nohup expo refine . \
+  --auto \
+  --rubric-file .brief/SELF-REFINE-RUBRIC.md \
+  --scope "src/**" "tests/**" \
+  --max 10 --run-timeout 3600 \
+  --total-budget 15 \
+  --event-file /tmp/expo-on-expo-$(date +%s).jsonl \
+  > /tmp/expo-on-expo.log 2>&1 &
+# Walk away. Come back in an hour.
+```
+
+What this proves or refutes:
+- Does costGuard actually stop a run at $15 or does it creep?
+- Does `--run-timeout` stop cleanly or leave zombie processes?
+- Does the loop make progress WITHOUT someone manually discarding bad
+  iterations when it over-engineers?
+- Does REFINE.md end up with actually-useful heuristics, or generic
+  motivational platitudes?
+- Does `.refine/inflight.json` actually save us if we kill -9 the run?
+
+If Shakedown A reveals bugs, fix them before Shakedown B. Bugs from A
+are universal (they affect every expo user); bugs from B are only about
+specific project-shape assumptions.
+
+### Shakedown B — other repos, to find project-shape assumption bugs
+
+Only after A is clean. Other repos reveal the bugs A can't find:
+- `--auto` guesses wrong for this project type
+- `--scope` globs don't handle this repo's layout
+- Tests need env setup refine doesn't know about
+- Polyglot gate interactions
+
+The bugs A finds are "expo is wrong." The bugs B finds are "expo assumed
+wrong." Both matter; A-bugs block everyone; B-bugs block adoption on
+unfamiliar code.
+
+---
+
+## Candidate-repo selection (for Shakedown B)
 
 Pick 3 repos in escalating shakedown difficulty. Bias toward repos you care
 about (makes review meaningful) but don't depend on (keeps stakes reasonable).
@@ -318,6 +375,17 @@ If a future session picks this up:
 1. Read `.brief/other-repo-shakedown.md` (this file)
 2. Check `shakedown/` for any prior runs' findings
 3. Confirm expo version: `cat apps/expo/deno.json | grep version`
-4. Start at the tier + phase where the prior work left off (or Phase 1 if
-   this is the first execution)
+4. If no `shakedown/` findings exist yet, start with **Shakedown A
+   (expo-on-expo unattended)** — the "point expo at a real repo" work
+   should NOT jump to other repos until the unattended story on the
+   home repo is proven
 5. Budget a specific session-spend cap before any `expo refine` fires
+
+## Why A-before-B matters
+
+Bugs found in Shakedown A are universal. Bugs found in Shakedown B are
+project-specific. If you run B first and find "gate promotion didn't
+fire when it should have," you won't know if that's because of B's
+project shape or because of an A-class bug that would also happen on
+expo itself. Ordering A first means every B finding is cleanly
+attributable to project-shape assumptions.
