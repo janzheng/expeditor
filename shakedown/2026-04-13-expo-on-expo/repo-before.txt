@@ -1,0 +1,26 @@
+=== git log -5 ===
+cd31662 Shakedown brief: add Shakedown A (expo-on-expo unattended) before B
+3694602 .brief/other-repo-shakedown.md — planning brief for shakedown session
+5292706 Docs: QUICKSTART.md + midrun-steering design sketch
+4b29587 v0.2.9 — per-gate timeout + dashboard gate UI + waiting-set concurrency
+c8cf522 v0.2.8 — --gate-file + gate promotion (emergent consensus → root gate)
+
+=== git status ===
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.brief/SELF-REFINE-RUBRIC.md
+	shakedown/
+
+nothing added to commit but untracked files present (use "git add" to track)
+
+=== deno.json version ===
+  "version": "0.2.9",
+
+=== .refine/manifest.json head ===
+  "head": "021"
+
+=== variant count ===
+22

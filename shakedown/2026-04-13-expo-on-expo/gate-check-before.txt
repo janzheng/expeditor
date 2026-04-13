@@ -1,0 +1,13 @@
+Checking 9 gates against [021]:
+
+  ✓ typecheck (inherited from [000])   36ms
+  ✓ gate-unit-tests (inherited from [000])   131ms
+  ✓ snapshot-tests (inherited from [000])   1637ms
+  ✓ ssrf-tests (inherited from [000])   24ms
+  ✓ race-verdict-tests (inherited from [000])   49ms
+  ✓ bus-pending-cap-tests (inherited from [000])   31ms
+  ✓ bus-offline-signal-tests (inherited from [000])   25ms
+  ✓ mxit-cache-tests (inherited from [000])   41ms
+  ✓ scope-violations-tests (inherited from [000])   38ms
+
+All 9 gates pass.

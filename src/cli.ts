@@ -178,8 +178,19 @@ async function saveLedgerAndReport(ledger: PermissionLedger): Promise<void> {
 
 // --- Commands ---
 
+// Reject `--`-prefixed tokens as positional args so `expo spawn --help`
+// doesn't spawn an agent with "--help" as its prompt. Fixes shakedown
+// Finding #1 (positional-eats-flag).
+function rejectFlagAsPositional(value: string | undefined, usage: string): void {
+  if (value && (value.startsWith("--") || value === "-h")) {
+    console.error(usage);
+    Deno.exit(1);
+  }
+}
+
 async function cmdSpawn(args: string[]): Promise<void> {
   const prompt = args[0];
+  rejectFlagAsPositional(prompt, "Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree] [--timeout <seconds>] [--sandbox <preset>] [--auto-approve] [--max-turns <N>] [--max-tool-calls <N>] [--validate <cmd>]");
   if (!prompt) {
     console.error("Usage: cli.ts spawn <prompt> [--name <name>] [--model <model>] [--no-worktree] [--timeout <seconds>] [--sandbox <preset>] [--auto-approve] [--max-turns <N>] [--max-tool-calls <N>] [--validate <cmd>]");
     Deno.exit(1);
@@ -563,6 +574,7 @@ async function cmdCleanup(args: string[]): Promise<void> {
 
 async function cmdReview(args: string[]): Promise<void> {
   const prompt = args[0];
+  rejectFlagAsPositional(prompt, "Usage: cli.ts review <prompt> [--max <N>] [--timeout <seconds>] [--work-agent claude|codex] [--review-agent claude|codex]");
   if (!prompt) {
     console.error("Usage: cli.ts review <prompt> [--max <N>] [--timeout <seconds>] [--work-agent claude|codex] [--review-agent claude|codex]");
     Deno.exit(1);
@@ -1107,6 +1119,12 @@ async function cmdPermissions(args: string[]): Promise<void> {
 
 async function cmdRefine(args: string[]): Promise<void> {
   const dir = args[0];
+
+  // Don't consume `--help` / `-h` as the <dir> positional — that would
+  // create a `./--help` directory, seed a refine manifest, and spawn an
+  // agent. Fixes shakedown Finding #1 (observed at cost $0.33 + stray
+  // ./--help/.refine/ state + fabricated REFINE.md).
+  rejectFlagAsPositional(dir, "Usage: expo refine <dir> [--auto] [--rubric <text>] [--rubric-file <path>] [--scope <glob>...] [--gate-file <path>] [--max <N>] [--run-timeout <sec>] [--total-budget <N>] [--per-agent-budget <N>] [--event-file <path>] [--approval-hook <cmd>] [--allow-agent-gates]\n       expo refine <dir> --tree | --status | gate (list|check|add|remove) | heuristics\n       expo refine <dir> --continue    Continue a previously stopped run");
 
   // Handle --tree and --status as quick exits (no dir required, defaults to .)
   // `--format json` or `--json` switches to machine-readable output so

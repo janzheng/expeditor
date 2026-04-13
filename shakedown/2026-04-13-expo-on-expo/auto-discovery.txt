@@ -1,0 +1,14 @@
+Auto-discovery (deno):
+  • deno.json has tasks.test → seeded "deno_test" gate
+
+# Note: shakedown's `expo refine . --auto` detected the Deno project shape
+# and added one gate (deno_test → "deno task test"). This is ADDITIVE to
+# the 9 gates already inherited at head=021 (typecheck, gate-unit-tests,
+# snapshot-tests, ssrf-tests, race-verdict-tests, bus-pending-cap-tests,
+# bus-offline-signal-tests, mxit-cache-tests, scope-violations-tests).
+
+# UX observation: banner reads "Gates: 1 seeded on baseline" without
+# mentioning the 9 inherited. A user new to this repo couldn't tell from
+# the banner alone whether 1 or 10 gates were in force. Candidate UX
+# polish for post-shakedown — possible Finding #2 if the inherited
+# surface is actually off somehow (to be verified when gate runs happen).
