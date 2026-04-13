@@ -133,6 +133,11 @@ export interface RefineResult {
   finalVariantId: string;
   /** Count of times an inherited gate forced a discard. */
   gateFailures: number;
+  /** Count of times scope enforcement force-discarded an iteration
+   *  (agent touched a file outside --scope). Separated from gateFailures
+   *  per shakedown Finding #11 — previously both counts were bundled as
+   *  "Gate fails" which mis-described scope issues as gate issues. */
+  scopeViolations: number;
   /** Count of gates the agent proposed (0 if `allowAgentGates` is off). */
   gatesProposed: number;
   /** Count of iterations whose output looked like an infrastructure error
@@ -648,6 +653,9 @@ To proceed, pick one:
 
   // Counters for the result summary
   let gateFailures = 0;
+  // Track scope-violation force-discards separately from real gate failures
+  // so the final banner can describe each accurately (shakedown Finding #11).
+  let scopeViolations = 0;
   let gatesProposed = 0;
   // Infra-failure tracking (shakedown Finding #3). Counts API 5xx /
   // network errors separately from semantic discards. Consecutive count
@@ -723,7 +731,7 @@ To proceed, pick one:
       finalVariantId = getLastKeptId(variants) ?? "000";
       await updateRefineMd(bus, spawner, dir, variants, opts);
       await clearInflight(dir);
-      return buildResult("WALL_CLOCK_EXCEEDED", iterations - 1, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
+      return buildResult("WALL_CLOCK_EXCEEDED", iterations - 1, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded, scopeViolations);
     }
 
     // Refresh variant list
@@ -813,7 +821,7 @@ To proceed, pick one:
         );
         await updateRefineMd(bus, spawner, dir, variants, opts);
         await clearInflight(dir);
-        return buildResult("INFRA_FAILURE", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
+        return buildResult("INFRA_FAILURE", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded, scopeViolations);
       }
       // Skip this iteration entirely — don't record a variant, don't run
       // gates, don't update discardCounts. It never happened semantically.
@@ -873,7 +881,7 @@ To proceed, pick one:
       await updateRefineMd(bus, spawner, dir, variants, opts);
 
       await clearInflight(dir);
-      return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
+      return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded, scopeViolations);
     }
 
     if (verdict.action === "keep") {
@@ -884,7 +892,7 @@ To proceed, pick one:
       if (opts.scope && opts.scope.length > 0 && agentTouchedPaths && agentTouchedPaths.length > 0) {
         const violations = findScopeViolations(agentTouchedPaths, opts.scope);
         if (violations.length > 0) {
-          gateFailures++;
+          scopeViolations++;
           console.log(
             `[refine] scope violation — agent touched ${violations.length} file(s) outside --scope: ${violations.slice(0, 3).join(", ")}${violations.length > 3 ? ` (+${violations.length - 3} more)` : ""}`,
           );
@@ -907,7 +915,7 @@ To proceed, pick one:
             variants = await list(dir);
             await updateRefineMd(bus, spawner, dir, variants, opts);
             await clearInflight(dir);
-            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
+            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded, scopeViolations);
           }
           continue;
         }
@@ -963,7 +971,7 @@ To proceed, pick one:
           variants = await list(dir);
           await updateRefineMd(bus, spawner, dir, variants, opts);
           await clearInflight(dir);
-          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
+          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded, scopeViolations);
         }
 
         continue;
@@ -1022,7 +1030,7 @@ To proceed, pick one:
         variants = await list(dir);
         await updateRefineMd(bus, spawner, dir, variants, opts);
         await clearInflight(dir);
-        return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
+        return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded, scopeViolations);
       }
     }
   }
@@ -1032,7 +1040,7 @@ To proceed, pick one:
   finalVariantId = getLastKeptId(variants) ?? "000";
   await updateRefineMd(bus, spawner, dir, variants, opts);
   await clearInflight(dir);
-  return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
+  return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded, scopeViolations);
 }
 
 /** Emit a status-kind progress signal with refine-loop context. Collapses
@@ -1922,6 +1930,7 @@ function buildResult(
   infraFailures = 0,
   preRunKept = 0,
   preRunDiscarded = 0,
+  scopeViolations = 0,
 ): RefineResult {
   const keptVariants = variants.filter((v) => v.status === "kept" || v.status === "baseline").length;
   const discardedVariants = variants.filter((v) => v.status === "discarded").length;
@@ -1935,6 +1944,7 @@ function buildResult(
     sessionDiscarded: Math.max(0, discardedVariants - preRunDiscarded),
     finalVariantId,
     gateFailures,
+    scopeViolations,
     gatesProposed,
     ...(infraFailures > 0 ? { infraFailures } : {}),
   };

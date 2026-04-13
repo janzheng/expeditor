@@ -343,6 +343,7 @@ async function cmdSpawn(args: string[]): Promise<void> {
 
 async function cmdSpawnAll(args: string[]): Promise<void> {
   const tasksFile = args[0];
+  rejectFlagAsPositional(tasksFile, "Usage: cli.ts spawn-all <tasks.json>\n\ntasks.json format:\n  [{\"prompt\": \"...\", \"name\": \"agent-1\"}, ...]");
   if (!tasksFile) {
     console.error("Usage: cli.ts spawn-all <tasks.json>");
     console.error("");
@@ -437,6 +438,7 @@ async function cmdResume(args: string[]): Promise<void> {
   const agentId = args[0];
   const headless = args.includes("--headless");
 
+  rejectFlagAsPositional(agentId, "Usage: cli.ts resume <agentId> [--headless]");
   if (!agentId) {
     console.error("Usage: cli.ts resume <agentId> [--headless]");
     Deno.exit(1);
@@ -515,6 +517,7 @@ async function cmdResume(args: string[]): Promise<void> {
 
 async function cmdFork(args: string[]): Promise<void> {
   const agentId = args[0];
+  rejectFlagAsPositional(agentId, "Usage: cli.ts fork <agentId>");
   if (!agentId) {
     console.error("Usage: cli.ts fork <agentId>");
     Deno.exit(1);
@@ -723,6 +726,8 @@ async function cmdRalph(args: string[]): Promise<void> {
   const workPrompt = args[0];
   const gatePrompt = args[1];
 
+  rejectFlagAsPositional(workPrompt, 'Usage: cli.ts ralph "<work prompt>" "<gate prompt>" [--max <N>] [--review]');
+  rejectFlagAsPositional(gatePrompt, 'Usage: cli.ts ralph "<work prompt>" "<gate prompt>" [--max <N>] [--review]');
   if (!workPrompt || !gatePrompt) {
     console.error('Usage: cli.ts ralph "<work prompt>" "<gate prompt>" [--max <N>] [--review]');
     Deno.exit(1);
@@ -796,6 +801,7 @@ async function cmdRalph(args: string[]): Promise<void> {
 
 async function cmdWorkflow(args: string[]): Promise<void> {
   const workflowFile = args[0];
+  rejectFlagAsPositional(workflowFile, "Usage: cli.ts workflow <file.md> [--model <model>] [--agent <type>] [--budget <N>] [--timeout <seconds>] [--dry-run] [--sandbox <preset>]");
   if (!workflowFile) {
     console.error("Usage: cli.ts workflow <file.md> [--model <model>] [--agent <type>] [--budget <N>] [--timeout <seconds>] [--dry-run] [--sandbox <preset>]");
     Deno.exit(1);
@@ -915,6 +921,7 @@ async function cmdWorkflow(args: string[]): Promise<void> {
 
 async function cmdMxit(args: string[]): Promise<void> {
   const tasksFile = args[0];
+  rejectFlagAsPositional(tasksFile, "Usage: cli.ts mxit <TASKS.md> [--agent <type>] [--model <model>] [--timeout <seconds>] [--max <N>] [--parallel] [--budget <N>]");
   if (!tasksFile) {
     console.error("Usage: cli.ts mxit <TASKS.md> [--agent <type>] [--model <model>] [--timeout <seconds>] [--max <N>] [--parallel] [--budget <N>]");
     Deno.exit(1);
@@ -989,6 +996,11 @@ async function cmdMxit(args: string[]): Promise<void> {
 async function cmdPermissions(args: string[]): Promise<void> {
   const ledger = await loadLedger();
   const subcommand = args[0];
+
+  // Reject `--help`/`--anything` as the subcommand slot — subcommands are
+  // plain words (approve/reject/sync/reset/list). Prints usage instead of
+  // the confusing "Unknown subcommand: --help" error. Finding #1-audit.
+  rejectFlagAsPositional(subcommand, "Usage: expo permissions [list|approve <pattern>|reject <pattern>|sync|reset] [--auto-sync]");
 
   const autoSync = args.includes("--auto-sync");
   const syncSettings = async () => {
@@ -1506,6 +1518,9 @@ async function cmdRefine(args: string[]): Promise<void> {
   }
   if (result.gateFailures > 0) {
     console.log(`  Gate fails: ${YELLOW}${result.gateFailures}${RESET} (variants forced-discarded by inherited gates)`);
+  }
+  if (result.scopeViolations > 0) {
+    console.log(`  Scope viols: ${YELLOW}${result.scopeViolations}${RESET} (variants forced-discarded for touching out-of-scope paths)`);
   }
   if (result.infraFailures && result.infraFailures > 0) {
     console.log(`  Infra fails: ${YELLOW}${result.infraFailures}${RESET} (API 5xx / network — not counted as discards)`);

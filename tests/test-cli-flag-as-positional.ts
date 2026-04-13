@@ -80,5 +80,30 @@ console.log("Flag-as-positional rejection (shakedown Finding #1):");
   check(r.code === 0, "refine . gate list still succeeds (happy path)");
 }
 
+// --- Finding #1-audit polish: the 7 remaining subcommands ---
+// None of these burn money on `--help`, but they used to print cryptic
+// downstream errors (JSON.parse fails, file not found, "Unknown subcommand").
+// The fix makes them print proper usage before those downstream errors.
+
+for (const sub of ["spawn-all", "resume", "fork", "workflow", "mxit"]) {
+  const r = await runCli(sub, "--help");
+  check(r.code === 1, `${sub} --help exits 1`);
+  check(/^Usage:/m.test(r.stderr), `${sub} --help prints clean usage (not downstream error)`);
+}
+
+// ralph takes TWO positionals — exercise the first-slot rejection.
+{
+  const r = await runCli("ralph", "--help", "anything");
+  check(r.code === 1, "ralph --help <arg2> exits 1 on first positional");
+  check(/Usage: cli\.ts ralph/.test(r.stderr), "ralph --help prints proper usage");
+}
+
+// permissions: any --flag as subcommand slot should print usage
+{
+  const r = await runCli("permissions", "--help");
+  check(r.code === 1, "permissions --help exits 1");
+  check(/Usage: expo permissions/.test(r.stderr), "permissions --help prints usage (not 'Unknown subcommand')");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 Deno.exit(fail === 0 ? 0 : 1);
