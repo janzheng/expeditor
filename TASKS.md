@@ -2,9 +2,10 @@
 
 Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** v0.2.9 shipped. 19 source files, ~9,400 lines. 638+ unit tests across 28 focused test files + 19 snapshot-package tests. Gate-ratchet: check, file-load, promotion, per-gate timeout, dashboard UI. Concurrency: bounded fan-out + waiting-set semantics. Every `[?]` open question except Brigade's auth/smolvm/deferred ones is now shipped. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand + `--auto` zero-config). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. Staggered kill-wave + bus drain on cost-guard overrun. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed.
+**Status:** v0.2.9 shipped + Shakedown A+B fixes applied (2026-04-13 evening). 19 source files, ~9,400 lines. 660+ unit tests across 29 focused test files + 21 snapshot-package tests. Gate-ratchet: check, file-load, promotion, per-gate timeout, dashboard UI. Concurrency: bounded fan-out + waiting-set semantics. Every `[?]` open question except Brigade's auth/smolvm/deferred ones is now shipped. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand + `--auto` zero-config + stale-baseline detection + plumbing-based snapshots). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. Staggered kill-wave + bus drain on cost-guard overrun. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed. Shakedown A+B found 11 findings, 10 shipped fixes same day (see `shakedown/` artifacts).
 
 **Recent milestones:**
+- `2026-04-13 evening` — Shakedown A+B close-out: 10 of 11 findings fixed in-session (incl. 2 sev-1). Expo now safe to point at external repos — no branch pollution, no scope false-positives, no silent tree rewinds, clean `--help` on all 10 positional-taking subcommands. See `shakedown/2026-04-13-*/findings.md` for the full account and `.brief/cost-per-keep-analytics.md` for the s-curve framing that came out of the retrospective.
 - `v0.2.9` (2026-04-13) — per-gate timeout + dashboard gate UI + waiting-set concurrency (three more `[?]` questions shipped)
 - `v0.2.8` (2026-04-13) — `--gate-file` JSON config loader + gate promotion (emergent consensus → root gate)
 - `v0.2.7` (2026-04-13) — `--format json` / `--json` on gate list, --tree, --status (structured output for orchestrators)
@@ -24,6 +25,75 @@ Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DES
 ## Current
 
 All actionable work complete. 3 P3 items remain in design/question phase.
+
+## Shakedown A+B (2026-04-13) — findings + fix log #shakedown
+
+Day-long expo-on-expo (Shakedown A rounds 1-2) + tier-1 on `snapshot`
+(Shakedown B). Full artifact dirs:
+- `shakedown/2026-04-13-expo-on-expo/findings.md` — rounds 1+2
+- `shakedown/2026-04-13-expo-on-expo-round-2/` — the clean CONVERGED run
+- `shakedown/2026-04-13-tier1-snapshot/findings.md` — tier-1 on snapshot
+
+Eleven findings surfaced. One marked auto-resolved by structural fix;
+the other ten shipped same-day.
+
+### Shipped fixes
+
+- [x] **Finding #1** (medium) — `expo refine --help` consumed `--help` as `<dir>`, spawned agent ($0.33 observed), created stray `./--help/` dir. `rejectFlagAsPositional` helper applied to spawn, review, refine. `tests/test-cli-flag-as-positional.ts` (10 checks). [commit `a71452d`]
+- [x] **Finding #1-audit polish** (low) — 7 more positional-taking subcommands (spawn-all, resume, fork, ralph, workflow, mxit, permissions) had cryptic downstream errors on `--help`. Now all 10 print clean usage. 14 additional regression checks (24 total). [commit `73e200d`]
+- [x] **Finding #2** (high) — `--scope "a" "b"` silently dropped all but first glob. Parser now greedy + still supports repeated-flag form. Affected every doc example. [commit `1e41888`]
+- [x] **Finding #3** (medium) — API 5xx classified as semantic discard, polluting branching logic. New `isInfraFailure()` classifier + `INFRA_FAILURE` verdict + 3-consecutive early exit. [commit `1e41888`]
+- [x] **Finding #4** (SEV-1) — Snapshot restore silently rewound working tree to pre-v0.2.2 state. New `detectSnapshotDrift()` + pre-run refusal with recovery paths + `--force-stale-baseline` escape hatch + distinct exit code 4. [commit `1e41888`]
+- [x] **Finding #5** (low) — Banner undercounted gates (showed "1 seeded" when 10 inherited + 1 seeded). Now reads manifest for accurate count. [commit `1e41888`]
+- [x] **Finding #6** (low) — Final banner mixed lifetime + session counts. New `sessionKept`/`sessionDiscarded` on `RefineResult`; banner shows "Kept: N this session (M lifetime)". [commit `d64b315`]
+- [x] **Finding #7 / #10** (SEV-1) — Project-git snapshot backend advanced branch HEAD on every commit, polluting main with `refine/NNN` noise (incl. force-discards). Rewrote to use plumbing (`write-tree` + `commit-tree` + `update-ref tags/`) — branch HEAD never moves. 2 new regression tests (single snapshot + 10-iter burst). [snapshot commit `f353f6f`]
+- [x] **Finding #8** (high) — Scope enforcement caught expo's own runtime output (`.expo/logs/`, `.sigbus/`) as "agent-touched", force-discarding every iteration on external repos. New `isExpoInternalPath()` filter in `listDirtyPaths()`. 14 regression checks. [commit `8c685f4`]
+- [x] **Finding #11** (low) — Banner labeled scope violations as "Gate fails". Split into `scopeViolations` counter + dedicated banner line. [commit `73e200d`]
+
+### Auto-resolved (no separate fix)
+
+- [x] **Finding #9** (medium, auto-resolved) — Post-force-discard tree state was confusing (files appeared deleted in git status) because discarded commits still advanced branch HEAD. Expected to auto-resolve from #7/#10 fix; not separately verified.
+
+### Meta artifacts from the session
+
+- **`.brief/cost-per-keep-analytics.md`** — design sketch for a
+  cost-per-keep analytics primitive. Came out of the "how do you
+  know you're at the top of the s-curve?" retrospective question.
+  Includes the diagnostic algorithm (verdict × sessionKept ×
+  failure-mode mix → one-line interpretation of what happened) and
+  the "gambling run" pathology case (refine on a markdown knowledge
+  garden where there are no gates). First-ship scope ~60 LOC.
+
+- **Round-2 CONVERGED run on expo-on-expo** — proved the s-curve
+  shape empirically. 0 session keeps + CONVERGED verdict + mixed
+  objection types = healthy top-of-curve. Same shape of result with
+  MAX_ITERATIONS = broken loop. Round 1's verdict was ambiguous;
+  round 2's was informative.
+
+- **Tier-1 on snapshot (Shakedown B)** — fired on throwaway branch
+  `shakedown-tier1` to sidestep unfixed Finding #7. Found #8 + #9 +
+  #10 + #11. Three legitimate keeps (addGate validation, restore()
+  error clarity, init() validation) all eaten by #8 before the fix.
+  Re-run on tier-1 (now or next session) would validate the #7-#11
+  fixes.
+
+### Not yet validated end-to-end
+
+- [ ] Re-run Shakedown A with all fixes applied — should produce
+  CONVERGED with zero infra-failure noise and session-kept count
+  honestly reflecting whether anything keep-worthy was found.
+- [ ] Re-run Shakedown B tier-1 on snapshot — should let iter-1's
+  legitimate addGate validation keep actually survive.
+- [ ] Shakedown B tier-2 (medium repo — `smolvm` or `tigerflare`) —
+  previously blocked by #8. Now unblocked.
+
+### Rainy-day: tier-4 pathological
+
+- [?] Pathological gambling run on the research repo
+  (`github-repos/`) — no gates, no tests, markdown knowledge
+  garden. ~$500 estimate to actually run. Only interesting as a
+  case study for cost-per-keep's "meaningless without gates"
+  argument. Don't do this — just reference it in the brief.
 
 ### Headless permissions — `--auto-approve` [shipped 2026-04-01]
 
