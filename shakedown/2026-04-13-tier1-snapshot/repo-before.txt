@@ -1,0 +1,31 @@
+=== git log master ===
+a00e79c Add Gate.timeoutMs for per-gate timeout override
+992ebfa Initial commit — gate ratchet + HEAD tracking + scope control
+
+=== git log shakedown-tier1 ===
+a00e79c Add Gate.timeoutMs for per-gate timeout override
+992ebfa Initial commit — gate ratchet + HEAD tracking + scope control
+
+=== current branch ===
+shakedown-tier1
+
+=== src/ layout ===
+mod.ts
+snapshot.ts
+snapshot_test.ts
+types.ts
+
+=== LOC ===
+      26 src/mod.ts
+     488 src/snapshot.ts
+     713 src/snapshot_test.ts
+      48 src/types.ts
+    1275 total
+
+=== deno tasks ===
+  "tasks": {
+    "test": "deno test src/ --allow-read --allow-write --allow-run",
+    "check": "deno check src/mod.ts"
+  },
+  "compilerOptions": {
+    "strict": true
