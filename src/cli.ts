@@ -1126,17 +1126,27 @@ async function cmdRefine(args: string[]): Promise<void> {
     return;
   }
 
+  // `expo refine <dir> heuristics [--json]` — inspect REFINE.md
+  if (args[1] === "heuristics") {
+    const json = args.includes("--json");
+    const { showRefineHeuristics } = await import("./refine.ts");
+    await showRefineHeuristics(dir || ".", { json });
+    return;
+  }
+
   if (!dir) {
     console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N] [--run-timeout N]");
-    console.error("                       [--gate \"name=command\"] [--allow-agent-gates] [--gate-timeout N]");
+    console.error("                       [--gate \"name=command\"] [--allow-agent-gates] [--gate-timeout N] [--json] [--event-file PATH]");
     console.error("                       [--per-agent-budget USD] [--total-budget USD] [--scope GLOB]");
     console.error("");
     console.error("Quick commands:");
     console.error("  expo refine <dir> --tree     Show archive tree");
     console.error("  expo refine <dir> --status   Show archive summary");
     console.error("  expo refine <dir> gate list [variant_id]");
+    console.error("  expo refine <dir> gate check [variant_id] [--timeout MS] [--json]");
     console.error("  expo refine <dir> gate add <variant_id> --name N --command C [--rationale R]");
     console.error("  expo refine <dir> gate remove <variant_id> --name N");
+    console.error("  expo refine <dir> heuristics [--json]   Print REFINE.md + parsed sections");
     Deno.exit(1);
   }
 
@@ -1155,6 +1165,12 @@ async function cmdRefine(args: string[]): Promise<void> {
   let allowAgentGates = false;
   let gateTimeout: number | undefined;
   let runTimeout: number | undefined;
+  // --json: emit final RefineResult as ONE JSON object on stdout.
+  // Signal prints go to stderr so stdout stays parseable by orchestrators.
+  let jsonOutput = false;
+  // --event-file: write one JSONL line per bus signal to a file so external
+  // consumers (dashboards, CI, downstream agents) can tail live progress.
+  let eventFile: string | undefined;
   // Budget guards — previously hard-coded at $2/agent and $20 total.
   // Expose as flags so long unattended sessions don't require editing source.
   let perAgentBudget = 2.0;
@@ -1187,6 +1203,8 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--allow-agent-gates") allowAgentGates = true;
     else if (args[i] === "--gate-timeout" && args[i + 1]) gateTimeout = parseIntArg("--gate-timeout", args[++i]);
     else if (args[i] === "--run-timeout" && args[i + 1]) runTimeout = parseIntArg("--run-timeout", args[++i], { min: 1 });
+    else if (args[i] === "--json") jsonOutput = true;
+    else if (args[i] === "--event-file" && args[i + 1]) eventFile = args[++i];
     else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
     else if (args[i] === "--scope" && args[i + 1]) scope.push(args[++i]);
@@ -1205,8 +1223,43 @@ async function cmdRefine(args: string[]): Promise<void> {
   const logFile = `${LOGS_DIR}/bus-refine-${Date.now()}.jsonl`;
   const bus = new SignalBus({ logFile });
   await bus.init();
-  bus.subscribe(printSignal);
+  // In --json mode, stdout is reserved for the final result object.
+  // Route signal prints to stderr and skip the pretty banner so pipe-consumers
+  // see ONE parseable JSON object at the end.
+  if (jsonOutput) {
+    bus.subscribe((s) => printSignalToStderr(s));
+  } else {
+    bus.subscribe(printSignal);
+  }
   maybeAttachWebhook(bus);
+
+  // --event-file: write one JSONL line per signal to the caller-specified
+  // path so external agents can tail it live (independent of the default
+  // bus log, which goes under LOGS_DIR with a timestamped name).
+  let eventFileHandle: Deno.FsFile | undefined;
+  if (eventFile) {
+    try {
+      eventFileHandle = await Deno.open(eventFile, {
+        write: true,
+        create: true,
+        truncate: true,
+      });
+      const eventEncoder = new TextEncoder();
+      bus.subscribe((signal) => {
+        // Best-effort — a write error here shouldn't kill the refine run.
+        if (!eventFileHandle) return;
+        try {
+          const loggable = { ...signal };
+          // deno-lint-ignore no-explicit-any
+          delete (loggable as any)._raw;
+          eventFileHandle.writeSync(eventEncoder.encode(JSON.stringify(loggable) + "\n"));
+        } catch { /* swallowed — signal still reached other subscribers */ }
+      });
+    } catch (err) {
+      console.error(`${RED}Cannot open --event-file ${eventFile}: ${String(err).slice(0, 200)}${RESET}`);
+      Deno.exit(2);
+    }
+  }
 
   const registry = new Registry();
   const spawner = new AgentSpawner(bus, { registry });
@@ -1214,30 +1267,35 @@ async function cmdRefine(args: string[]): Promise<void> {
 
   const unguard = costGuard(bus, { perAgentBudget, totalBudget, spawner });
 
-  console.log(`${BOLD}Refine Loop${RESET}`);
-  console.log(`  Directory:  ${dir}`);
-  console.log(`  Rubric:     ${rubric ? rubric.slice(0, 60) + (rubric.length > 60 ? "..." : "") : "(none — agent will decide)"}`);
-  console.log(`  Max iter:   ${maxIterations}`);
-  if (runTimeout) console.log(`  Run cap:    ${runTimeout}s wall-clock (stops between iterations)`);
-  console.log(`  Agent:      ${agent}${model ? `:${model}` : ""}`);
-  if (branchFrom) console.log(`  Branch from: ${branchFrom}`);
+  // Banner goes to stderr under --json so stdout stays pure.
+  const banner = jsonOutput ? console.error : console.log;
+  banner(`${BOLD}Refine Loop${RESET}`);
+  banner(`  Directory:  ${dir}`);
+  banner(`  Rubric:     ${rubric ? rubric.slice(0, 60) + (rubric.length > 60 ? "..." : "") : "(none — agent will decide)"}`);
+  banner(`  Max iter:   ${maxIterations}`);
+  if (runTimeout) banner(`  Run cap:    ${runTimeout}s wall-clock (stops between iterations)`);
+  banner(`  Agent:      ${agent}${model ? `:${model}` : ""}`);
+  if (branchFrom) banner(`  Branch from: ${branchFrom}`);
   if (perAgentBudget !== 2.0 || totalBudget !== 20.0) {
-    console.log(`  Budget:     $${perAgentBudget.toFixed(2)}/agent, $${totalBudget.toFixed(2)} total`);
+    banner(`  Budget:     $${perAgentBudget.toFixed(2)}/agent, $${totalBudget.toFixed(2)} total`);
   }
-  if (interactive) console.log(`  Interactive: yes`);
+  if (interactive) banner(`  Interactive: yes`);
   if (gates.length > 0) {
-    console.log(`  Gates:      ${gates.length} seeded on baseline`);
+    banner(`  Gates:      ${gates.length} seeded on baseline`);
     for (const g of gates) {
-      console.log(`              • ${g.name}: ${g.command.slice(0, 70)}`);
+      banner(`              • ${g.name}: ${g.command.slice(0, 70)}`);
     }
   }
-  if (allowAgentGates) console.log(`  Agent gates: enabled (agent may propose new gates)`);
+  if (allowAgentGates) banner(`  Agent gates: enabled (agent may propose new gates)`);
   if (scope.length > 0) {
-    console.log(`  Scope:      ${scope.length} glob(s) — agent may only modify these paths`);
-    for (const g of scope) console.log(`              • ${g}`);
+    banner(`  Scope:      ${scope.length} glob(s) — agent may only modify these paths`);
+    for (const g of scope) banner(`              • ${g}`);
   }
-  console.log(`  Log:        ${logFile}`);
-  console.log("");
+  banner(`  Log:        ${logFile}`);
+  if (eventFile) banner(`  Events:     ${eventFile} (JSONL)`);
+  banner("");
+
+  const runStartedAt = Date.now();
 
   const { refine } = await import("./refine.ts");
   const result = await refine(bus, spawner, {
@@ -1260,6 +1318,33 @@ async function cmdRefine(args: string[]): Promise<void> {
 
   unguard();
   await bus.close();
+  if (eventFileHandle) {
+    try { eventFileHandle.close(); } catch { /* already closed */ }
+  }
+
+  const durationMs = Date.now() - runStartedAt;
+
+  if (jsonOutput) {
+    // ONE JSON object on stdout — anything else goes to stderr.
+    // Keys alphabetical within each section so diffs between runs are stable.
+    const payload = {
+      verdict: result.verdict,
+      iterations: result.iterations,
+      kept: result.keptVariants,
+      discarded: result.discardedVariants,
+      gateFailures: result.gateFailures,
+      gatesProposed: result.gatesProposed,
+      finalVariantId: result.finalVariantId,
+      costUsd: result.totalCostUsd,
+      durationMs,
+      logFile,
+      eventFile: eventFile ?? null,
+    };
+    console.log(JSON.stringify(payload));
+    // Exit code: 0 on CONVERGED, 1 on terminal non-convergence so CI/
+    // orchestrators can gate on exit status without parsing the JSON.
+    Deno.exit(result.verdict === "CONVERGED" ? 0 : 1);
+  }
 
   console.log("");
   console.log(`${BOLD}=== Refine Result ===${RESET}`);
@@ -1280,11 +1365,42 @@ async function cmdRefine(args: string[]): Promise<void> {
   }
   console.log(`  Final:      [${result.finalVariantId}]`);
   console.log(`  Cost:       $${result.totalCostUsd.toFixed(4)}`);
+  console.log(`  Duration:   ${(durationMs / 1000).toFixed(1)}s`);
 
   if (result.verdict !== "CONVERGED") {
     console.log("");
     console.log(`  ${DIM}Continue: expo refine ${dir} --continue --max ${maxIterations}${RESET}`);
     console.log(`  ${DIM}Tree:     expo refine ${dir} --tree${RESET}`);
+  }
+}
+
+/** Same as printSignal but writes to stderr so --json mode can keep stdout
+ *  pristine for the final JSON result. */
+function printSignalToStderr(signal: AgentSignal): void {
+  const agent = `${BOLD}${signal.agentId}${RESET}`;
+  const ts = new Date(signal.timestamp).toISOString().slice(11, 19);
+  const prefix = `${DIM}${ts}${RESET} ${agent}`;
+  // Keep the set compact — we don't need the full rendering on stderr during
+  // --json runs; an orchestrator will read the JSONL log if it wants detail.
+  switch (signal.type) {
+    case "spawned":
+      console.error(`${prefix} ${GREEN}● spawned${RESET}`);
+      break;
+    case "done":
+      console.error(`${prefix} ${GREEN}✓ done${RESET}`);
+      break;
+    case "failed":
+      console.error(`${prefix} ${RED}✗ failed${RESET}`);
+      break;
+    case "progress": {
+      const p = signal.payload as Record<string, unknown>;
+      const msg = (p.message as string) ?? "";
+      if (msg) console.error(`${prefix} ${DIM}${msg}${RESET}`);
+      break;
+    }
+    default:
+      // Tool calls, cost, etc. — skip, they're noisy and available in the log.
+      break;
   }
 }
 
@@ -1808,6 +1924,7 @@ ${BOLD}Commands:${RESET}
   refine <dir> gate check   Pre-flight: run inherited gates without a full refine loop
   refine <dir> gate add     Attach a named gate to a variant (inherits to descendants)
   refine <dir> gate remove  Remove a named gate from a variant
+  refine <dir> heuristics   Print REFINE.md cross-session learnings (+ --json)
   audit <dir> [flags]       Findings-only audit — agent reads source, writes .brief/audit-*.md
   audit <dir> --triage      Also run a triage agent to flag false positives
   serve [--port N]          Web dashboard — live agent cards in browser

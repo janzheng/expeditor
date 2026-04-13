@@ -2,9 +2,10 @@
 
 Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** v0.2.2 shipped. 19 source files, ~7,700 lines. 293+ unit tests across 15 focused test files + 19 snapshot-package tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check`). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed (29 fixed, 9 wontfix with rationale).
+**Status:** v0.2.3 shipped. 19 source files, ~7,900 lines. 353+ unit tests across 17 focused test files + 19 snapshot-package tests. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed (29 fixed, 9 wontfix).
 
 **Recent milestones:**
+- `v0.2.3` (2026-04-13) — structured `--json` refine output + `--event-file` JSONL tail + fenced `<verdict>` grammar + gate-failure feedback loop + `heuristics` subcommand
 - `v0.2.2` (2026-04-13) — pre-flight `expo refine <dir> gate check` + `--run-timeout` wall-clock cap + 4 remaining TASKS-AUDIT items closed (A010/A015/A024/A025)
 - `v0.2.1` (2026-04-12) — concurrency semaphore on race/workflow/mxit; `--max-concurrent N` flag
 - `v0.2.0` (2026-04-12) — gate ratchet + audit command + serve auth + costGuard enforcement + SSRF + symlink + withTimeout pgid + 10 other audit fixes
@@ -155,7 +156,7 @@ Audit-driven + wishlist P1s:
 - [x] [fixed: src/orchestrator.ts costGuard now kills per-agent on overrun or all-running on total, emits structured BudgetExceededPayload; all 4 call sites updated to pass spawner] Verify cost-guard enforces (not just logs) + distinct exit code `-> .brief/agentic-audit.md` #security #budget
 - [x] [shipped 2026-04-13: `expo refine <dir> gate check [variant_id] [--timeout MS] [--json]`. checkRefineGates runs every inherited gate (no fail-fast), returns per-gate pass/fail/timedOut/stderr. Exits 0 all-pass / 1 any-fail. tests/test-refine-gate-check.ts (31 checks). Pre-flight primitive for orchestrating agents.] `gate check` subcommand — verify gates pass before firing a long refine loop `-> TASKS-AGENTIC-UX.md` #agentic-ux #gates
 - [x] [shipped 2026-04-13: `--run-timeout N` CLI flag on `expo refine`. RefineOptions.runTimeout (seconds) caps wall-clock. Loop checks deadline between iterations, emits wall_clock_exceeded progress signal, runs updateRefineMd, returns verdict "WALL_CLOCK_EXCEEDED". Per-iteration timeout auto-clamped to remaining budget so a stuck iteration can't overrun.] Per-run wall-clock timeout (`--run-timeout`) `-> TASKS-AGENTIC-UX.md` #safety #resilience
-- [ ] Verdict parser — fenced `<verdict>` block grammar `-> TASKS-AGENTIC-UX.md` #parsing
+- [x] [shipped 2026-04-13: parseVerdict now tries fenced `<verdict>{"action":"keep",...}</verdict>` JSON block first; malformed/missing → falls back to legacy line grammar with stderr warning. gate_proposals array supported inside the fenced JSON. Prompts rewritten to teach the new grammar (line grammar now labelled "legacy fallback"). tests/test-refine-fenced-verdict.ts (32 checks) covering: fenced wins over line format, multiple-block last-wins, malformed-JSON fallback, unknown-action fallback, gate_proposals parsing + malformed-entry filtering, case-insensitive actions.] Verdict parser — fenced `<verdict>` block grammar `-> TASKS-AGENTIC-UX.md` #parsing
 
 ### Priority 2 — agentic UX wins
 
@@ -171,10 +172,10 @@ Audit-driven + wishlist P1s:
 - [x] [fixed by expo refine iter-013: src/spawner.ts — exported isValidAllowedDomain + assertValidAllowedDomains with RFC-1123 regex; refuses bash metacharacters before interpolation. tests/test-domain-filter-injection.ts (37 checks)] Domain filter bash injection `-> .brief/agentic-audit.md` #security #spawner
 - [x] [fixed by expo refine iter-019: src/permission-ledger.ts — process-wide singleton with async write queue serializing concurrent approve/reject; src/web.ts uses shared instance. tests/test-permission-ledger-singleton.ts (13 checks)] Permission HTTP endpoints ledger race `-> .brief/agentic-audit.md` #race #permissions
 - [x] [fixed by expo refine iter-021: src/web.ts — pure parseRunStats(content) helper + {mtime,size} cache backs handleListRuns + handleCostSummary; two legacy cost shapes both preserved. tests/test-run-stats-cache.ts (35 checks)] Web endpoints full-rescan per request `-> .brief/agentic-audit.md` #speed #web
-- [ ] `--json` flag on `expo refine` result `-> TASKS-AGENTIC-UX.md` #agentic-ux #output
-- [ ] Pass gate-failure context into next iteration's prompt `-> TASKS-AGENTIC-UX.md` #feedback #gates
+- [x] [shipped 2026-04-13: `--json` flag on `expo refine <dir>` emits ONE JSON object on stdout (verdict, iterations, kept, discarded, gateFailures, gatesProposed, finalVariantId, costUsd, durationMs, logFile, eventFile). Signal prints route to stderr; banner suppressed from stdout. Exit code 0 on CONVERGED / 1 otherwise. Plus `--event-file PATH` writes one JSONL line per bus signal for live tailing by orchestrators.] `--json` flag on `expo refine` result `-> TASKS-AGENTIC-UX.md` #agentic-ux #output
+- [x] [shipped 2026-04-13: recentFailures ring (cap 3) in refine() captures {iteration, change, gateName, reason} on every gate-forced discard; fed into next iteration's prompt under "Do NOT repeat these recently-failed approaches". Ring cleared on KEEP (lineage moved, old warnings stale). Tests in tests/test-refine-feedback.ts (28 checks) confirm prompt rendering + omission when empty.] Pass gate-failure context into next iteration's prompt `-> TASKS-AGENTIC-UX.md` #feedback #gates
 - [ ] Token-efficient formats (TOON / compact) for gate list, --tree, --status `-> TASKS-AGENTIC-UX.md` #agentic-ux #toon
-- [ ] `expo refine <dir> heuristics` — expose REFINE.md to orchestrators `-> TASKS-AGENTIC-UX.md` #agentic-ux
+- [x] [shipped 2026-04-13: `expo refine <dir> heuristics [--json]` prints REFINE.md + parsed `## Heading` sections. JSON form gives orchestrators programmatic access to cross-session learnings. loadRefineHeuristics() exported for library use. Missing-file returns {exists:false} instead of throwing.] `expo refine <dir> heuristics` — expose REFINE.md to orchestrators `-> TASKS-AGENTIC-UX.md` #agentic-ux
 
 ### Priority 3 — bigger lifts
 
@@ -293,12 +294,13 @@ expo race "A" vs "B" [--criteria "..."] [--timeout N] [--snapshot-dir <dir>]
 expo ralph "<work>" "<gate>" [--max N] [--review]
 expo workflow <file.md> [--agent TYPE] [--model M] [--budget N] [--timeout N] [--sandbox S]
 expo mxit <TASKS.md> [--agent TYPE] [--parallel] [--max N] [--timeout N] [--sandbox S] [--snapshot-dir <dir>]
-expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--agent TYPE] [--timeout N] [--run-timeout N]
+expo refine <dir> [--rubric "..."] [--rubric-file F] [--max N] [--continue] [--branch-from ID] [--interactive] [--agent TYPE] [--timeout N] [--run-timeout N] [--json] [--event-file PATH]
 expo refine <dir> --tree | --status
 expo refine <dir> gate list [variant_id]
 expo refine <dir> gate check [variant_id] [--timeout MS] [--json]
 expo refine <dir> gate add <variant_id> --name N --command C [--rationale R]
 expo refine <dir> gate remove <variant_id> --name N
+expo refine <dir> heuristics [--json]
 expo serve [--port N] [--log <file.jsonl>]
 expo permissions [list]
 expo permissions approve <pattern> [--auto-sync]

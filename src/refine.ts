@@ -182,6 +182,12 @@ export async function refine(
   let gatesProposed = 0;
   const gateTimeoutMs = (opts.gateTimeout ?? 60) * 1000;
 
+  // Gate-failure feedback ring: keep the last few gate-broken attempts so we
+  // can feed them into the next prompt. Bounded to keep context usage small;
+  // after this many failures the first-in gets dropped.
+  const MAX_RECENT_FAILURES = 3;
+  const recentFailures: RecentFailure[] = [];
+
   let iterations = 0;
   let finalVariantId = getLastKeptId(variants) ?? "000";
 
@@ -241,6 +247,7 @@ export async function refine(
       dir,
       inheritedGates,
       allowAgentGates: opts.allowAgentGates ?? false,
+      recentFailures: recentFailures.length > 0 ? [...recentFailures] : undefined,
     });
 
     // b. Snapshot of working-tree "dirty" paths BEFORE agent spawn.
@@ -370,18 +377,32 @@ export async function refine(
 
       if (!gateResult.ok) {
         gateFailures++;
+        // Memo this failure into the feedback ring so the next iteration's
+        // prompt explicitly warns against repeating the same approach.
+        const gateFailedName = gateResult.failed!.name;
+        const gateExit = gateResult.failed!.exitCode;
+        recentFailures.push({
+          iteration: iterations,
+          change: verdict.change.slice(0, 200),
+          gateName: gateFailedName,
+          reason: gateExit === -1 ? "timeout" : `exit ${gateExit}`,
+        });
+        if (recentFailures.length > MAX_RECENT_FAILURES) {
+          recentFailures.shift();
+        }
+
         await emitRefineProgress(
           bus,
           agentName,
           iterations,
-          `gate_failed: ${gateResult.failed!.name} (exit ${gateResult.failed!.exitCode}) — forcing discard`,
+          `gate_failed: ${gateFailedName} (exit ${gateExit}) — forcing discard`,
           {
-            gateFailed: gateResult.failed!.name,
-            gateExitCode: gateResult.failed!.exitCode,
+            gateFailed: gateFailedName,
+            gateExitCode: gateExit,
           },
         );
         console.log(
-          `[refine] gate '${gateResult.failed!.name}' failed (exit ${gateResult.failed!.exitCode}) — discarding iteration ${iterations}`,
+          `[refine] gate '${gateFailedName}' failed (exit ${gateExit}) — discarding iteration ${iterations}`,
         );
 
         // Restore to last kept, discard with gate-failure reason, and
@@ -410,6 +431,13 @@ export async function refine(
       });
       variants = await list(dir);
       finalVariantId = getLastKeptId(variants) ?? "000";
+
+      // A kept iteration moved the lineage forward — prior gate failures are
+      // now about a different starting state, so clear the warning ring to
+      // avoid misleading the next iteration. (Only clear on KEEP; the
+      // rubric-discard path leaves us on the same lineage, so keeping the
+      // failure memos there is still useful.)
+      recentFailures.length = 0;
 
       // Attach any agent-proposed gates to the newly kept variant.
       // Only honoured when allowAgentGates is true; we already filtered
@@ -618,7 +646,7 @@ async function commandExists(name: string): Promise<boolean> {
 
 // ── Prompt building ────────────────────────────────────────────
 
-interface PromptContext {
+export interface PromptContext {
   rubric?: string;
   heuristics: string;
   archiveContext: string;
@@ -627,9 +655,28 @@ interface PromptContext {
   dir: string;
   inheritedGates: Gate[];
   allowAgentGates: boolean;
+  /** Recently-failed attempts the agent should NOT repeat. Empty on iter 1.
+   *  Fed from recentGateFailures in the refine loop. */
+  recentFailures?: RecentFailure[];
 }
 
-function buildRefinePrompt(ctx: PromptContext): string {
+/** Gate-failure memo from a prior iteration, injected into the next prompt
+ *  so the agent avoids re-proposing the same broken approach. */
+export interface RecentFailure {
+  /** Iteration number the failure happened on. */
+  iteration: number;
+  /** The change the agent attempted that broke a gate. */
+  change: string;
+  /** Which gate blocked the attempt. */
+  gateName: string;
+  /** Exit code / "timeout" for quick triage. */
+  reason: string;
+}
+
+/** Exported for unit tests — the refine loop calls this to assemble every
+ *  iteration's agent prompt. Test surface covers: gate-failure feedback
+ *  rendering, heuristics inlining, archive-context formatting. */
+export function buildRefinePrompt(ctx: PromptContext): string {
   const parts: string[] = [];
 
   parts.push(`You are a refinement agent. Your job is to iteratively improve the project in: ${ctx.dir}`);
@@ -667,6 +714,21 @@ function buildRefinePrompt(ctx: PromptContext): string {
     parts.push("");
   }
 
+  // Gate-failure feedback: if recent iterations got discarded because they
+  // tripped a gate, surface them here so the agent doesn't re-propose the
+  // same broken approach. Bounded to the last few so the context stays small.
+  if (ctx.recentFailures && ctx.recentFailures.length > 0) {
+    parts.push("## Do NOT repeat these recently-failed approaches");
+    parts.push(
+      "Prior iterations attempted these changes; each broke an inherited gate and was rolled back. Pick a different approach — the fix is not in this direction.",
+    );
+    parts.push("");
+    for (const f of ctx.recentFailures) {
+      parts.push(`- iter ${f.iteration}: "${f.change}" → broke gate \`${f.gateName}\` (${f.reason})`);
+    }
+    parts.push("");
+  }
+
   parts.push("## Instructions");
   parts.push("");
   parts.push("1. Examine the current state of the project");
@@ -674,35 +736,53 @@ function buildRefinePrompt(ctx: PromptContext): string {
   parts.push("3. Output your verdict in EXACTLY this format at the END of your response:");
   parts.push("");
   parts.push("```");
-  parts.push("VERDICT: KEEP|DISCARD|CONVERGED");
-  parts.push("CHANGE: <short description of what you changed>");
-  parts.push("SUMMARY: <why this was kept/discarded, or why the project has converged>");
+  parts.push("<verdict>");
+  parts.push("{");
+  parts.push('  "action": "keep" | "discard" | "converged",');
+  parts.push('  "change": "short description of what you changed",');
+  parts.push('  "summary": "why this was kept/discarded, or why the project has converged"');
+  if (ctx.allowAgentGates) {
+    parts.push('  , "gate_proposals": [ /* optional — see below */ ]');
+  }
+  parts.push("}");
+  parts.push("</verdict>");
   parts.push("```");
   parts.push("");
+  parts.push("The `<verdict>` block must be valid JSON — no trailing commas, strings double-quoted. This is the primary grammar; the harness will fall back to the legacy line format (`VERDICT: KEEP` etc.) ONLY if the `<verdict>` block is missing or malformed, so prefer the fenced form.");
+  parts.push("");
   parts.push("Rules:");
-  parts.push("- KEEP: You made a change that improves the project. The change will be snapshotted.");
-  parts.push("- DISCARD: You attempted a change but it made things worse or didn't help. The change will be rolled back.");
-  parts.push("- CONVERGED: The project meets the rubric criteria and no further improvements are needed.");
+  parts.push("- keep: You made a change that improves the project. The change will be snapshotted.");
+  parts.push("- discard: You attempted a change but it made things worse or didn't help. The change will be rolled back.");
+  parts.push("- converged: The project meets the rubric criteria and no further improvements are needed.");
   parts.push("- Make exactly ONE focused change per iteration — do not try to fix everything at once.");
-  parts.push("- If you are not sure whether a change helps, lean toward DISCARD so we can try a different approach.");
+  parts.push("- If you are not sure whether a change helps, lean toward discard so we can try a different approach.");
 
   if (ctx.allowAgentGates) {
     parts.push("");
     parts.push("## Optional: proposing a gate");
     parts.push("");
     parts.push(
-      "If your KEEP change fixes a fragile behavior that descendants should NEVER regress, you MAY propose a gate. A gate is a shell command that will run before every future variant on this lineage; any non-zero exit auto-discards that variant.",
+      "If your keep change fixes a fragile behavior that descendants should NEVER regress, you MAY propose a gate. A gate is a shell command that will run before every future variant on this lineage; any non-zero exit auto-discards that variant.",
     );
     parts.push("");
-    parts.push("Add one or more GATE_PROPOSAL lines before your VERDICT block, in JSON:");
+    parts.push('Add proposals to the `gate_proposals` array in the `<verdict>` block:');
     parts.push("");
     parts.push("```");
-    parts.push(
-      'GATE_PROPOSAL: {"name": "auth_tests", "command": "deno test tests/auth/", "rationale": "spent 3 iterations; easy to regress"}',
-    );
+    parts.push("<verdict>");
+    parts.push("{");
+    parts.push('  "action": "keep",');
+    parts.push('  "change": "fixed auth refresh",');
+    parts.push('  "summary": "refresh flow was racy under load",');
+    parts.push('  "gate_proposals": [');
+    parts.push('    { "name": "auth_tests", "command": "deno test tests/auth/", "rationale": "easy to regress" }');
+    parts.push('  ]');
+    parts.push("}");
+    parts.push("</verdict>");
     parts.push("```");
     parts.push("");
-    parts.push("Propose gates ONLY for non-negotiable behaviors. Do NOT gate every passing test — that over-constrains the search. Only propose on KEEP verdicts. Gates can use `{dir}` and `{variantId}` placeholders.");
+    parts.push("Propose gates ONLY for non-negotiable behaviors. Do NOT gate every passing test — that over-constrains the search. Only propose on keep verdicts. Gate commands can use `{dir}` and `{variantId}` placeholders.");
+    parts.push("");
+    parts.push("(Legacy fallback: `GATE_PROPOSAL: {...}` lines before a line-style VERDICT block still work, but the fenced form is preferred.)");
   }
 
   return parts.join("\n");
@@ -730,6 +810,14 @@ function buildArchiveContext(variants: Variant[]): string {
 
 // Exported for unit testing only — not part of the public API.
 export function parseVerdict(output: string): ParsedVerdict {
+  // Prefer a fenced `<verdict>{...}</verdict>` block when present — it's an
+  // unambiguous grammar that can't collide with prose the agent writes about
+  // the verdict format itself (the line-based parser has had issues there).
+  // Falls back to the legacy line grammar when no block is found OR the block
+  // exists but its JSON doesn't parse.
+  const fenced = tryParseFencedVerdict(output);
+  if (fenced) return fenced;
+
   // Try to find structured verdict in the output
   const lines = output.split("\n");
 
@@ -793,6 +881,92 @@ export function parseVerdict(output: string): ParsedVerdict {
   }
 
   return { action, change, summary, gateProposals };
+}
+
+/**
+ * Look for a `<verdict>{...JSON...}</verdict>` block in `output` and parse it.
+ *
+ * Returns a ParsedVerdict when the block is present AND the JSON is valid;
+ * returns null when the block is absent OR malformed (callers fall back to
+ * the line grammar in that case). A malformed block logs a warning so the
+ * failure doesn't vanish — the line parser then tries its luck on the same
+ * output, which usually still finds a verdict.
+ *
+ * Expected JSON shape:
+ *   {
+ *     "action": "keep" | "discard" | "converged",
+ *     "change": "short description",
+ *     "summary": "why",
+ *     "gate_proposals": [{ "name", "command", "rationale"? }]   // optional
+ *   }
+ *
+ * If multiple `<verdict>` blocks appear, the LAST one wins — same convention
+ * as the line parser. This lets an agent that self-corrects end with its
+ * final answer without us having to strip earlier drafts.
+ */
+function tryParseFencedVerdict(output: string): ParsedVerdict | null {
+  // Capture content inside the last <verdict>...</verdict> block. `[\s\S]` to
+  // match across newlines; `*?` to be non-greedy so multiple blocks don't
+  // glom together into one giant capture.
+  const re = /<verdict>\s*([\s\S]*?)\s*<\/verdict>/gi;
+  let lastMatch: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(output)) !== null) lastMatch = m[1];
+  if (lastMatch === null) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(lastMatch);
+  } catch (err) {
+    console.error(
+      `[refine] <verdict> block present but JSON invalid — falling back to line grammar: ${String(err).slice(0, 100)}`,
+    );
+    return null;
+  }
+
+  if (typeof parsed !== "object" || parsed === null) {
+    console.error(`[refine] <verdict> block is not a JSON object — falling back to line grammar`);
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  const rawAction = typeof obj.action === "string" ? obj.action.toLowerCase() : "";
+  let action: "keep" | "discard" | "converged";
+  if (rawAction === "keep") action = "keep";
+  else if (rawAction === "discard") action = "discard";
+  else if (rawAction === "converged") action = "converged";
+  else {
+    console.error(
+      `[refine] <verdict> action must be keep|discard|converged (got ${JSON.stringify(obj.action)}) — falling back`,
+    );
+    return null;
+  }
+
+  const change = typeof obj.change === "string" ? obj.change.trim() : "";
+  const summary = typeof obj.summary === "string" ? obj.summary.trim() : "";
+
+  // gate_proposals is optional; filter malformed entries silently (same
+  // tolerance as the line parser) so one bad proposal doesn't nuke the rest.
+  const gateProposals: GateProposal[] = [];
+  if (Array.isArray(obj.gate_proposals)) {
+    for (const p of obj.gate_proposals) {
+      if (typeof p !== "object" || p === null) continue;
+      const pr = p as Record<string, unknown>;
+      if (typeof pr.name !== "string" || typeof pr.command !== "string") continue;
+      if (pr.name.length === 0 || pr.command.length === 0) continue;
+      const proposal: GateProposal = { name: pr.name, command: pr.command };
+      if (typeof pr.rationale === "string" && pr.rationale.length > 0) {
+        proposal.rationale = pr.rationale;
+      }
+      gateProposals.push(proposal);
+    }
+  }
+
+  return {
+    action,
+    change: change || extractFirstMeaningfulLine(output),
+    summary,
+    gateProposals,
+  };
 }
 
 /** Parse a single GATE_PROPOSAL line payload. Returns null on any error
@@ -1169,6 +1343,131 @@ export async function removeRefineGate(
     console.error(`[refine] Failed to remove gate: ${String(err).slice(0, 200)}`);
     Deno.exit(1);
   }
+}
+
+/**
+ * Parsed sections from a REFINE.md file. Sections are detected by `## Heading`
+ * markers — typical headings are "Heuristics", "Next Session", and per-session
+ * logs like "Session 1". Keeps the whole file available so callers can inspect
+ * raw content if the section split doesn't match expectations.
+ */
+export interface RefineHeuristics {
+  /** Raw file contents. Empty string when REFINE.md doesn't exist. */
+  raw: string;
+  /** Absolute path to REFINE.md. */
+  path: string;
+  /** Whether the file exists on disk. */
+  exists: boolean;
+  /** Line count of the raw content (0 when empty). */
+  lineCount: number;
+  /** Map of `## Heading` → body text (trimmed). */
+  sections: Record<string, string>;
+  /** Heading names in the order they appear in the file. */
+  sectionOrder: string[];
+}
+
+/**
+ * Load and parse the REFINE.md heuristics file for `dir`.
+ *
+ * Used by `expo refine <dir> heuristics` and by orchestrating agents that
+ * want to inspect cross-session learnings without re-reading the raw file.
+ * Returns `{exists: false, raw: ""}` when the file doesn't exist — callers
+ * can treat a missing file as "no prior learnings" rather than an error.
+ */
+export async function loadRefineHeuristics(dir: string): Promise<RefineHeuristics> {
+  const path = `${dir}/${REFINE_MD}`;
+  let raw = "";
+  let exists = true;
+  try {
+    raw = await Deno.readTextFile(path);
+  } catch {
+    exists = false;
+  }
+
+  const sections: Record<string, string> = {};
+  const sectionOrder: string[] = [];
+
+  // Split on `## Heading` lines — any deeper heading (###, etc.) stays in
+  // the parent section body. A leading unlabeled block (before the first
+  // `##`) gets stored under "_preamble" so nothing is lost.
+  const lines = raw.split("\n");
+  let current: string | null = null;
+  let buffer: string[] = [];
+  const flush = () => {
+    if (current !== null) {
+      sections[current] = buffer.join("\n").trim();
+    } else if (buffer.some((l) => l.trim().length > 0)) {
+      sections._preamble = buffer.join("\n").trim();
+      if (!sectionOrder.includes("_preamble")) sectionOrder.unshift("_preamble");
+    }
+    buffer = [];
+  };
+
+  for (const line of lines) {
+    const match = line.match(/^##\s+(.+?)\s*$/);
+    if (match) {
+      flush();
+      current = match[1].trim();
+      if (!sectionOrder.includes(current)) sectionOrder.push(current);
+    } else {
+      buffer.push(line);
+    }
+  }
+  flush();
+
+  return {
+    raw,
+    path,
+    exists,
+    lineCount: raw ? raw.split("\n").length : 0,
+    sections,
+    sectionOrder,
+  };
+}
+
+/**
+ * CLI handler for `expo refine <dir> heuristics`. Prints REFINE.md content
+ * plus a parsed-section summary. Exposed so orchestrating agents can read
+ * prior-session learnings programmatically before firing a new refine loop.
+ */
+export async function showRefineHeuristics(
+  dir: string,
+  opts?: { json?: boolean },
+): Promise<void> {
+  const h = await loadRefineHeuristics(dir);
+
+  if (opts?.json) {
+    console.log(JSON.stringify({
+      path: h.path,
+      exists: h.exists,
+      lineCount: h.lineCount,
+      sectionOrder: h.sectionOrder,
+      sections: h.sections,
+      raw: h.raw,
+    }));
+    return;
+  }
+
+  if (!h.exists) {
+    console.log(`No REFINE.md found at ${h.path}.`);
+    console.log(`This file is created/updated at the end of each refine loop with`);
+    console.log(`cross-session heuristics. Run \`expo refine ${dir}\` to seed it.`);
+    return;
+  }
+
+  console.log(`REFINE.md: ${h.path}`);
+  console.log(`  ${h.lineCount} lines, ${h.sectionOrder.length} section${h.sectionOrder.length === 1 ? "" : "s"}`);
+  console.log("");
+  console.log("Sections:");
+  for (const name of h.sectionOrder) {
+    const body = h.sections[name] ?? "";
+    const bodyLines = body ? body.split("\n").length : 0;
+    const display = name === "_preamble" ? "(preamble — no heading)" : name;
+    console.log(`  • ${display} — ${bodyLines} line${bodyLines === 1 ? "" : "s"}`);
+  }
+  console.log("");
+  console.log("--- raw content ---");
+  console.log(h.raw);
 }
 
 /** Per-gate result for `checkRefineGates`. */

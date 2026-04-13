@@ -6,11 +6,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 ## Output for agents
 
-- [ ] Structured JSON output for refine results #agentic-ux #output
-  - [*] Add `--json` flag to `expo refine` that emits the final summary as one JSON object on stdout (nothing else)
-  - [*] Shape: `{verdict, iterations, kept, discarded, gateFailures, gatesProposed, finalVariantId, costUsd, perIteration: [{iter, action, change, summary, gateFailed?, cost}]}`
-  - [*] Consumers: external agents driving expo, CI, the dashboard
-  - [*] Optional `--event-file PATH` writes JSONL one line per bus event for live consumption
+- [x] [shipped 2026-04-13: `--json` on `expo refine <dir>` emits ONE JSON object on stdout: {verdict, iterations, kept, discarded, gateFailures, gatesProposed, finalVariantId, costUsd, durationMs, logFile, eventFile}. Signal prints go to stderr; banner suppressed. Exit 0 on CONVERGED / 1 otherwise. `--event-file PATH` also shipped — writes one JSONL line per bus signal for live consumption. perIteration array deferred: not tracked currently, the event-file covers the same need by being a superset.] Structured JSON output for refine results #agentic-ux #output
 
 - [ ] Token-efficient formats for CLI output (TOON-style) #agentic-ux #output #toon
   - [*] `gate list`, `--tree`, `--status` render pretty text tables
@@ -18,25 +14,15 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
   - [*] Directly inspired by AXI principle 1 (token-efficient output). See `github-repos/axi/notes.md`
   - [*] Not strictly required right now — measure actual context usage first
 
-- [ ] Expose REFINE.md heuristics to orchestrating agents #agentic-ux
-  - [*] REFINE.md is read into the spawned agent's prompt but invisible externally
-  - [*] Add `expo refine <dir> heuristics` subcommand that prints the file + parsed sections
-  - [*] Include path + last-updated in `--json` status output
+- [x] [shipped 2026-04-13: `expo refine <dir> heuristics [--json]` prints REFINE.md + parsed `## Heading` sections. loadRefineHeuristics() exported from refine.ts so orchestrators can import directly. Missing file returns {exists:false} — no throw. Text form shows section names + line counts, raw content, and a pointer when file is missing. 28 tests in tests/test-refine-feedback.ts.] Expose REFINE.md heuristics to orchestrating agents #agentic-ux
 
 ## Verification tools
 
 - [x] [shipped 2026-04-13: `expo refine <dir> gate check [variant_id] [--timeout MS] [--json]`. checkRefineGates runs ALL gates (no fail-fast), returns per-gate {pass, exitCode, durationMs, timedOut, source, addedBy, stderr}. --json emits structured result for orchestrators. Exit 0 all-pass / 1 any-fail. tests/test-refine-gate-check.ts — 31 checks including fail-doesn't-short-circuit, inherited-source tracking, timeout surfaces distinctly from plain exit, typo protection on unknown variant IDs.] `gate check` subcommand — run inherited gates without a full refine loop #agentic-ux #gates
 
-- [ ] Pass gate-failure context into next iteration's prompt #feedback #gates
-  - [*] Currently: gate discards a variant → next agent has no memory of why → may propose same change
-  - [*] Feed last N gate-failure reasons into the next prompt under "Do not repeat these failed approaches"
-  - [*] Compound-discount wasted spend on obviously-doomed iterations
+- [x] [shipped 2026-04-13: recentFailures ring (cap 3) in refine() captures {iteration, change, gateName, reason} on every gate-forced discard. Next iteration's prompt gets a "Do NOT repeat these recently-failed approaches" section listing each attempt + which gate it broke + exit reason (or "timeout"). Cleared on KEEP since lineage has moved. Tests in tests/test-refine-feedback.ts cover prompt rendering (present/absent/multiple), gate/timeout reason formatting, and insertion-order preservation.] Pass gate-failure context into next iteration's prompt #feedback #gates
 
-- [ ] Verdict parser: fenced-block grammar #agentic-ux #parsing
-  - [*] `parseVerdict` scans lines for `VERDICT: ...` — fragile if the agent echoes the format in prose
-  - [*] Currently "works" because last-match wins, but one bad explain-the-format output could misdirect
-  - [*] Change to require `<verdict>{"action":"keep",...}</verdict>` XML block with JSON payload
-  - [*] Side benefit: structured child fields naturally (gate_proposals array, optional fields)
+- [x] [shipped 2026-04-13: parseVerdict tries `<verdict>{JSON}</verdict>` block first. Expected JSON: {action: "keep"|"discard"|"converged", change, summary, gate_proposals?: [{name, command, rationale?}]}. Malformed/missing fenced block → falls back to legacy line grammar with a stderr warning so the failure is visible. Multiple fenced blocks → last wins (matches line-parser convention). Agent prompt rewritten to teach fenced form first, line form labelled "legacy fallback". 32 tests in tests/test-refine-fenced-verdict.ts.] Verdict parser: fenced-block grammar #agentic-ux #parsing
 
 ## Wall-clock safety
 
