@@ -30,11 +30,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) â
 
 - [x] [fixed 2026-04-12 in 8d7f58e: costGuard now kills offending agent on per-agent overrun, kills all-running on total overrun, emits structured BudgetExceededPayload. spawner gained killAgent() + killAllRunning() using process-group kill. All 4 call sites updated to pass spawner. Fired in production during audit-cleanup session ($5.17 > $5 killed update-md agent cleanly).] Verify cost-guard actually kills vs just logs #security #budget
 
-- [ ] Resumability after a crashed or killed run #agentic-ux #resilience
-  - [*] If refine dies mid-iteration (network, pkill, deno panic), what survives?
-  - [*] HEAD tracking means next snapshot will parent correctly â€” good baseline
-  - [*] Untested: does `expo refine .` on a dir with an existing `.refine/` pick up cleanly?
-  - [*] Possibly persist per-iteration in-flight state to `.refine/inflight.json`
+- [x] [shipped 2026-04-13: `.refine/inflight.json` written at each iteration start with schema v1 {completedIterations, runStartedAt, persistedAt, totalCost, gateFailures, gatesProposed, recentFailures, discardCounts, dir}. On startup with existing inflight, refine resumes: iteration counter continues, --max respects the original budget, --run-timeout honors the original wall-clock start, cost/gate counters survive, feedback ring intact, discard-streak branching still coherent. Stale (>12h), malformed, wrong-schema, non-object, or missing-fields files are detected, logged, deleted, and ignored so corruption never blocks a fresh start. Cleared on clean exit (CONVERGED/EXHAUSTED/MAX_ITERATIONS/WALL_CLOCK_EXCEEDED). 22 unit tests in tests/test-refine-inflight.ts.] Resumability after a crashed or killed run #agentic-ux #resilience
 
 ## Discovery / zero-config
 
@@ -50,10 +46,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) â
 
 - [x] [fixed 2026-04-12: src/concurrency.ts ConcurrencyLimit + DEFAULT_MAX_CONCURRENT=5; wired into race/workflow/mxit's processBatch (full spawn+wait lifecycle per slot); --max-concurrent N CLI flag on all three; 36 unit tests in tests/test-concurrency.ts] Concurrency semaphore on fan-outs (race/workflow/mxit) #safety #agentic-ux
 
-- [ ] Diff-based agent-touched-paths misses files from prior discarded iterations #bug #refine
-  - [*] cleanup-2 iter-3 self-discarded but left tests/test-run-stats-cache.ts in the working tree. Iter-4's pre-spawn listDirtyPaths saw the file as already-dirty, so when iter-4 legitimately recreated it, the file was filtered out of agentTouchedPaths. Ended up committed-loose (had to manually stage).
-  - [*] Two possible fixes: (a) after discard, clear non-scope-essential working-tree files too; (b) track "what was legitimately created this iteration" more precisely via timestamps or file-watcher rather than dirty-set difference.
-  - [*] Benign as-is â€” straggler is easy to spot and commit separately. But worth logging so it doesn't surprise anyone.
+- [x] [shipped 2026-04-13: recordDiscardAndMaybeBranch now accepts agentTouchedPaths and explicitly unlinks each path from the working tree AFTER restore. This targets project-git backend's `git checkout tag -- .` behaviour, which preserves untracked files by design â€” a discarded iteration's newly-created files otherwise lingered and confused the next iteration's dirty baseline. Wired into all 3 discard call sites (rubric-reject, scope-violation, gate-failure). Scoped to agent-created paths only (not concurrent user work). 10 unit tests in tests/test-refine-discard-cleanup.ts covering straggler removal, missing-file no-op, empty-touched-paths, and concurrent-user-work preservation.] Diff-based agent-touched-paths misses files from prior discarded iterations #bug #refine
 
 - [x] [shipped 2026-04-13: `killAllRunning(reason, {staggerMs})` spaces SIGTERMs with DEFAULT_KILL_STAGGER_MS=25 between agents; fan-outs no longer all die in the same microsecond. Opt-out via staggerMs=0. 15 tests in tests/test-kill-wave-polish.ts.] Stagger process kills in costGuard.killAllRunning #safety #bus
 

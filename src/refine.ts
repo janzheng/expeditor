@@ -129,6 +129,41 @@ const MAX_CONSECUTIVE_DISCARDS = 3;
 const ARCHIVE_CONTEXT_COUNT = 5;
 const REFINE_MD = "REFINE.md";
 
+// Resumability: per-iteration runtime state persisted under .refine/ so a
+// crashed / killed run can continue without losing its iteration budget
+// or discard-streak tracking. Stale files older than this are ignored
+// with a warning and overwritten — prevents accidental resume across
+// unrelated sessions (e.g. a week-old interrupted run).
+const INFLIGHT_FILE = "inflight.json";
+const INFLIGHT_STALE_MS = 12 * 60 * 60 * 1000; // 12 hours
+const INFLIGHT_SCHEMA_VERSION = 1;
+
+/**
+ * Serialized mid-run state written at the start of each iteration.
+ * Schema-versioned so future changes can cleanly reject old shapes.
+ */
+interface InflightState {
+  schemaVersion: number;
+  /** Iterations already fully completed (keep+snapshot, or discard+record). */
+  completedIterations: number;
+  /** Wall-clock of the original run start, so --run-timeout survives resume. */
+  runStartedAt: number;
+  /** When we last wrote this file — used to detect stale leftovers. */
+  persistedAt: number;
+  /** Running totals so cost/budget accounting survives a crash. */
+  totalCost: number;
+  gateFailures: number;
+  gatesProposed: number;
+  /** Gate-failure feedback ring (capped to MAX_RECENT_FAILURES at write time). */
+  recentFailures: RecentFailure[];
+  /** Consecutive-discard counts keyed by parent variant ID. Serialized as
+   *  array-of-pairs because JSON doesn't preserve Map natively. */
+  discardCounts: Array<[string, number]>;
+  /** The dir + rubric checksum we started with — optional sanity check so
+   *  a resume detects when inflight belongs to a different run config. */
+  dir: string;
+}
+
 /**
  * Decision returned by the approval gate (TTY prompt or hook command).
  * "accept" — apply the agent's verdict as-is.
@@ -278,6 +313,105 @@ export function _testOnlyParseApprovalOutput(stdout: string): ApprovalDecision |
   return parseApprovalOutput(stdout);
 }
 
+// ── Resumability helpers ───────────────────────────────────────
+
+/** Write current mid-run state to `.refine/inflight.json`. Best-effort —
+ *  a failed write logs a warning but doesn't fail the iteration (losing
+ *  resume state is better than aborting a paid-for iteration). */
+async function persistInflight(dir: string, state: InflightState): Promise<void> {
+  try {
+    const refineDir = `${dir}/.refine`;
+    // .refine/ is always created by snapshot init() before we get here, so
+    // we don't need to mkdir — but the try/catch handles the case where
+    // someone nuked the dir.
+    await Deno.mkdir(refineDir, { recursive: true });
+    await Deno.writeTextFile(`${refineDir}/${INFLIGHT_FILE}`, JSON.stringify(state));
+  } catch (err) {
+    console.error(`[refine] inflight persist failed (non-fatal): ${String(err).slice(0, 200)}`);
+  }
+}
+
+/** Try to load + validate existing inflight state. Returns null on any
+ *  failure (missing file, parse error, schema mismatch, stale) — the
+ *  caller starts fresh in that case. */
+async function loadInflight(dir: string): Promise<InflightState | null> {
+  const path = `${dir}/.refine/${INFLIGHT_FILE}`;
+  let raw: string;
+  try {
+    raw = await Deno.readTextFile(path);
+  } catch {
+    return null; // no file → normal start, no warning
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    console.error(`[refine] inflight.json unparseable, ignoring: ${String(err).slice(0, 200)}`);
+    await Deno.remove(path).catch(() => {});
+    return null;
+  }
+
+  if (typeof parsed !== "object" || parsed === null) {
+    console.error(`[refine] inflight.json is not an object, ignoring`);
+    await Deno.remove(path).catch(() => {});
+    return null;
+  }
+  const s = parsed as Partial<InflightState>;
+  if (s.schemaVersion !== INFLIGHT_SCHEMA_VERSION) {
+    console.error(`[refine] inflight.json schema v${s.schemaVersion} != expected v${INFLIGHT_SCHEMA_VERSION}, ignoring`);
+    await Deno.remove(path).catch(() => {});
+    return null;
+  }
+
+  const age = Date.now() - (s.persistedAt ?? 0);
+  if (age > INFLIGHT_STALE_MS) {
+    console.error(
+      `[refine] inflight.json is ${Math.round(age / 3600_000)}h old (> ${Math.round(INFLIGHT_STALE_MS / 3600_000)}h threshold) — starting fresh`,
+    );
+    await Deno.remove(path).catch(() => {});
+    return null;
+  }
+
+  // Required fields check — paranoid, but cheap. An old partial object
+  // missing a new field would otherwise crash downstream.
+  if (
+    typeof s.completedIterations !== "number" ||
+    typeof s.runStartedAt !== "number" ||
+    typeof s.totalCost !== "number" ||
+    typeof s.gateFailures !== "number" ||
+    typeof s.gatesProposed !== "number" ||
+    !Array.isArray(s.recentFailures) ||
+    !Array.isArray(s.discardCounts) ||
+    typeof s.dir !== "string"
+  ) {
+    console.error(`[refine] inflight.json missing required fields, ignoring`);
+    await Deno.remove(path).catch(() => {});
+    return null;
+  }
+
+  return s as InflightState;
+}
+
+/** Delete the inflight file on clean exit so the next run doesn't resume. */
+async function clearInflight(dir: string): Promise<void> {
+  try {
+    await Deno.remove(`${dir}/.refine/${INFLIGHT_FILE}`);
+  } catch { /* already gone */ }
+}
+
+// ── Test hooks ────────────────────────────────────────────────
+
+/** Re-exported for unit tests — exercise the persist/load/stale logic
+ *  without having to run a full refine loop. */
+export const _testOnlyInflight = {
+  persist: persistInflight,
+  load: loadInflight,
+  clear: clearInflight,
+  STALE_MS: INFLIGHT_STALE_MS,
+  SCHEMA_VERSION: INFLIGHT_SCHEMA_VERSION,
+};
+
 /** Read a single line from stdin (for interactive mode) */
 async function readStdinLine(): Promise<string> {
   const buf = new Uint8Array(256);
@@ -349,18 +483,54 @@ export async function refine(
   const MAX_RECENT_FAILURES = 3;
   const recentFailures: RecentFailure[] = [];
 
-  let iterations = 0;
+  // Resumability: pick up mid-run state from a prior crashed/killed run.
+  // Loop starts at completedResumeOffset so `--max` still honors the
+  // original budget; cost + gate counters survive; discard-streak state
+  // restored so the branching logic doesn't double-count.
+  let completedResumeOffset = 0;
+  const existingInflight = await loadInflight(dir);
+  if (existingInflight && existingInflight.dir === dir) {
+    completedResumeOffset = existingInflight.completedIterations;
+    totalCost = existingInflight.totalCost;
+    gateFailures = existingInflight.gateFailures;
+    gatesProposed = existingInflight.gatesProposed;
+    for (const f of existingInflight.recentFailures) recentFailures.push(f);
+    for (const [k, v] of existingInflight.discardCounts) discardCounts.set(k, v);
+    console.log(
+      `[refine] resuming from .refine/inflight.json — ${completedResumeOffset} iteration${completedResumeOffset === 1 ? "" : "s"} already completed, $${totalCost.toFixed(4)} spent, ${gateFailures} gate failure${gateFailures === 1 ? "" : "s"}`,
+    );
+  }
+
+  let iterations = completedResumeOffset;
   let finalVariantId = getLastKeptId(variants) ?? "000";
 
   // Wall-clock budget for the whole run (if --run-timeout was passed).
   // Per-iteration timeout is also clamped to the remaining budget so a
   // single stuck iteration can't overrun the wall clock arbitrarily.
-  const runStartedAt = Date.now();
+  // On resume, the run-started time is the ORIGINAL start so the total
+  // wall clock honors the user's --run-timeout across crashes.
+  const runStartedAt = existingInflight?.runStartedAt ?? Date.now();
   const runTimeoutMs = (opts.runTimeout ?? 0) * 1000;
   const runDeadline = runTimeoutMs > 0 ? runStartedAt + runTimeoutMs : 0;
 
-  for (let i = 0; i < maxIterations; i++) {
+  for (let i = completedResumeOffset; i < maxIterations; i++) {
     iterations = i + 1;
+
+    // Persist mid-run state BEFORE spawning the agent — if we die mid-spawn
+    // the next run will at least know how far we got. Best-effort; losing a
+    // write doesn't abort the iteration.
+    await persistInflight(dir, {
+      schemaVersion: INFLIGHT_SCHEMA_VERSION,
+      completedIterations: i,
+      runStartedAt,
+      persistedAt: Date.now(),
+      totalCost,
+      gateFailures,
+      gatesProposed,
+      recentFailures: [...recentFailures],
+      discardCounts: Array.from(discardCounts.entries()),
+      dir,
+    });
 
     // Wall-clock check: stop before we even start the next iteration so
     // the orchestrating agent can reason about a clean upper bound.
@@ -372,6 +542,7 @@ export async function refine(
       variants = await list(dir);
       finalVariantId = getLastKeptId(variants) ?? "000";
       await updateRefineMd(bus, spawner, dir, variants, opts);
+      await clearInflight(dir);
       return buildResult("WALL_CLOCK_EXCEEDED", iterations - 1, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
     }
 
@@ -492,6 +663,7 @@ export async function refine(
       // Update REFINE.md with session log
       await updateRefineMd(bus, spawner, dir, variants, opts);
 
+      await clearInflight(dir);
       return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
     }
 
@@ -516,13 +688,16 @@ export async function refine(
           );
 
           // Restore + record the discard + feed into branch-on-streak.
+          // Pass agentTouchedPaths so scope-violation cleanup doesn't leave
+          // stragglers that poison the next iteration's dirty baseline.
           const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
             change: verdict.change,
             summary: `scope_violation: ${violations.slice(0, 5).join(", ")}`.slice(0, 300),
-          });
+          }, agentTouchedPaths);
           if (outcome === "exhausted") {
             variants = await list(dir);
             await updateRefineMd(bus, spawner, dir, variants, opts);
+            await clearInflight(dir);
             return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
           }
           continue;
@@ -568,14 +743,17 @@ export async function refine(
         );
 
         // Restore to last kept, discard with gate-failure reason, and
-        // potentially branch if the discard streak hit the limit.
+        // potentially branch if the discard streak hit the limit. Pass
+        // agentTouchedPaths so straggler files from this failed attempt
+        // don't linger and confuse the next iteration's dirty baseline.
         const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
           change: verdict.change,
           summary: `gate_failed:${gateResult.failed!.name} — ${verdict.summary}`.slice(0, 300),
-        });
+        }, agentTouchedPaths);
         if (outcome === "exhausted") {
           variants = await list(dir);
           await updateRefineMd(bus, spawner, dir, variants, opts);
+          await clearInflight(dir);
           return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
         }
 
@@ -614,13 +792,15 @@ export async function refine(
       // Reset consecutive discard count for this lineage
       discardCounts.set(finalVariantId, 0);
     } else {
+      // Rubric-driven discard — same scope cleanup applies.
       const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
         change: verdict.change,
         summary: verdict.summary,
-      });
+      }, agentTouchedPaths);
       if (outcome === "exhausted") {
         variants = await list(dir);
         await updateRefineMd(bus, spawner, dir, variants, opts);
+        await clearInflight(dir);
         return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
       }
     }
@@ -630,6 +810,7 @@ export async function refine(
   variants = await list(dir);
   finalVariantId = getLastKeptId(variants) ?? "000";
   await updateRefineMd(bus, spawner, dir, variants, opts);
+  await clearInflight(dir);
   return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
 }
 
@@ -1197,11 +1378,36 @@ async function recordDiscardAndMaybeBranch(
   variants: Variant[],
   discardCounts: Map<string, number>,
   entry: { change: string; summary: string },
+  /** Paths the agent actually touched this iteration (diff of dirty set).
+   *  When provided, we explicitly remove these from the working tree AFTER
+   *  restore — project-git's `git checkout tag -- .` doesn't clean untracked
+   *  files, so a discarded attempt's newly-created files would otherwise
+   *  linger. Stragglers confuse the next iteration's pre-spawn dirty diff
+   *  (file appears already-dirty, so the legitimate re-creation gets
+   *  filtered out of agentTouchedPaths at snapshot time). Scoped to paths
+   *  the AGENT created, not concurrent user work. */
+  agentTouchedPaths?: string[],
 ): Promise<"continue" | "exhausted"> {
   const lastKeptId = getLastKeptId(variants);
   if (lastKeptId) {
     await restore(dir, lastKeptId);
   }
+
+  // Belt-and-suspenders cleanup for project-git backend. `restore()` handles
+  // tracked files via `git checkout tag -- .`, but untracked files the agent
+  // created survive. Explicitly remove them so the next iteration's dirty
+  // baseline is clean. Best-effort — a failed unlink just logs.
+  if (agentTouchedPaths && agentTouchedPaths.length > 0) {
+    for (const p of agentTouchedPaths) {
+      try {
+        await Deno.remove(`${dir}/${p}`, { recursive: true });
+      } catch {
+        // File may not exist (restore already handled it) or may be a dir
+        // that's been partially cleaned — either way, safe to ignore.
+      }
+    }
+  }
+
   await discard(dir, entry);
 
   const parentKey = lastKeptId || "root";
