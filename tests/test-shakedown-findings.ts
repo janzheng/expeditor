@@ -5,7 +5,7 @@
 // Finding #4: Snapshot restore silently rewound working tree to pre-v0.2.2 state. SEV-1.
 // Finding #5: Banner said "1 seeded on baseline" when 10 gates were actually in force.
 
-import { isInfraFailure, detectSnapshotDrift } from "../src/refine.ts";
+import { isInfraFailure, detectSnapshotDrift, isExpoInternalPath } from "../src/refine.ts";
 
 let pass = 0;
 let fail = 0;
@@ -171,6 +171,43 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
     await Deno.remove(tmpDir2, { recursive: true });
   }
 }
+
+// --- Finding #8: expo internal path filter -----------------------------------
+
+console.log("\nFinding #8 — isExpoInternalPath filter:");
+
+// These should all be recognized as expo's own runtime output and filtered
+// out of agent-touched paths.
+check(isExpoInternalPath(".expo/logs/bus-refine-123.jsonl"),
+  "matches .expo/logs/bus-refine-*.jsonl");
+check(isExpoInternalPath(".expo/output/run.txt"),
+  "matches .expo/output/*");
+check(isExpoInternalPath(".expo"),
+  "matches bare .expo");
+check(isExpoInternalPath(".expo/"),
+  "matches .expo/ with trailing slash");
+check(isExpoInternalPath(".sigbus/pid.json"),
+  "matches .sigbus/*");
+check(isExpoInternalPath(".sigbus"),
+  "matches bare .sigbus");
+check(isExpoInternalPath(".refine/manifest.json"),
+  "matches .refine/*");
+check(isExpoInternalPath(".refine/work/foo.ts"),
+  "matches .refine/work nested");
+
+// These should NOT be filtered — they're legitimate agent-touched paths.
+check(!isExpoInternalPath("src/cli.ts"),
+  "does NOT match src/cli.ts");
+check(!isExpoInternalPath("tests/test-foo.ts"),
+  "does NOT match tests/test-foo.ts");
+check(!isExpoInternalPath("README.md"),
+  "does NOT match README.md");
+check(!isExpoInternalPath(".expo-custom"),
+  "does NOT match paths that merely start with .expo (no slash after)");
+check(!isExpoInternalPath("something/.expo/x"),
+  "does NOT match .expo nested inside something else");
+check(!isExpoInternalPath(".gitignore"),
+  "does NOT match .gitignore");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 Deno.exit(fail === 0 ? 0 : 1);

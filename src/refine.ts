@@ -2855,6 +2855,20 @@ export function findScopeViolations(paths: string[], scope: string[]): string[] 
  *  Porcelain format: `XY<space><path>` where XY are two status chars.
  *  Rename lines also include ` -> <newpath>`; we strip that and keep
  *  only the rename destination since that's what the agent produced. */
+/** Paths that expo's own runtime writes during every refine iteration.
+ *  Excluded from agent-touched set so scope enforcement doesn't flag them
+ *  (shakedown Finding #8). Excluded by PREFIX — any child under these
+ *  dirs is also excluded. */
+const EXPO_INTERNAL_PATH_PREFIXES = [
+  ".expo/",     // bus/agent log files
+  ".sigbus/",   // signal bus persistence
+  ".refine/",   // refine manifest + snapshot state (usually gitignored, but belt+suspenders)
+];
+
+export function isExpoInternalPath(p: string): boolean {
+  return EXPO_INTERNAL_PATH_PREFIXES.some((pfx) => p === pfx.slice(0, -1) || p.startsWith(pfx));
+}
+
 async function listDirtyPaths(dir: string): Promise<Set<string> | null> {
   try {
     const proc = await new Deno.Command("git", {
@@ -2871,7 +2885,11 @@ async function listDirtyPaths(dir: string): Promise<Set<string> | null> {
       const rest = line.slice(3); // drop the 3-char status prefix
       // Handle rename arrows: `old -> new`; keep the new path
       const arrowIdx = rest.indexOf(" -> ");
-      paths.add(arrowIdx >= 0 ? rest.slice(arrowIdx + 4) : rest);
+      const path = arrowIdx >= 0 ? rest.slice(arrowIdx + 4) : rest;
+      // Filter expo's own runtime output — those aren't "agent-touched",
+      // that's just us writing our own logs/bus state (Finding #8).
+      if (isExpoInternalPath(path)) continue;
+      paths.add(path);
     }
     return paths;
   } catch {
