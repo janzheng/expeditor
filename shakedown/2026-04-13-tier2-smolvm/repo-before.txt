@@ -1,0 +1,10 @@
+=== fire time ===
+Mon Apr 13 12:39:54 PDT 2026
+
+=== smolvm HEAD ===
+e9cc956 feat: add linux-aarch64 binaries, CI target, and changelog
+99fb885 test: add audit fix verification tests + adversarial edge cases
+75e7455 feat: snapshot push/pull preserves machine config (A009)
+
+=== branch ===
+shakedown-tier2

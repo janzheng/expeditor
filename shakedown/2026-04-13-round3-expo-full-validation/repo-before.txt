@@ -1,0 +1,13 @@
+=== fire time ===
+Mon Apr 13 12:08:39 PDT 2026
+
+=== expo HEAD ===
+54d8592 Add refine philosophy brief + intentional README scope
+33dc038 Cleanup: drop stale claude-code worktree + gitignore that dir
+f576db6 Shakedown B tier-1 RE-RUN: complete validation of fix round
+
+=== binary ===
+-rwxr-xr-x  1 janzheng  staff  81762866 Apr 13 11:26 /Users/janzheng/.deno/bin/expo
+
+=== no prior refine state ===
+ls: .refine: No such file or directory

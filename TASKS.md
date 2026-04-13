@@ -79,16 +79,48 @@ the other ten shipped same-day.
 
 ### Not yet validated end-to-end
 
-- [ ] Re-run Shakedown A with all fixes applied — optional; tier-1
-  re-run below gave equivalent end-to-end validation signal.
+- [x] **Re-run Shakedown A on expo (round 3)** — done 2026-04-13 evening
+  with fresh `.refine/` state, all 10 fixes applied. EXHAUSTED, 0 keeps,
+  $7.45. Different failure mode than round 2 (CONVERGED): loop
+  correctly caught a real `deno_test` gate failure on iter-2's
+  sandbox-preset improvement (the test hardcoded the old message). Two
+  budget-exceeded events revealed **Finding #12** — cost-guard can't
+  interrupt long Bash calls. See
+  `shakedown/2026-04-13-round3-expo-full-validation/findings.md`.
 - [x] **Re-run Shakedown B tier-1 on snapshot** — done 2026-04-13 evening.
   MAX_ITERATIONS with **5 session keeps and 0 discards** (inverse of
   v1's 0 keeps + 3 scope-violation discards). Every fix validated with
   direct evidence. 5 keeps landed on snapshot's `master` as commit
   `16010dc` (API-boundary validation + error clarity). See
   `shakedown/2026-04-13-tier1-snapshot-rerun/findings.md`.
-- [ ] Shakedown B tier-2 (medium repo — `smolvm` or `tigerflare`) —
-  previously blocked by #8. Now unblocked.
+- [x] **Shakedown B tier-2 on smolvm (polyglot)** — done 2026-04-13
+  evening. EXHAUSTED, 0 keeps, $3.24. All 3 iterations hit the SAME
+  `deno_test` gate, which was failing on baseline because smolvm's
+  test suite requires `smolvm serve` running at 127.0.0.1:9090.
+  **Finding #13** — `--auto` doesn't pre-flight gates, baseline-broken
+  gates silently sabotage every iteration. Finding #14 (LOW) — polyglot
+  `--auto` correctly seeds both deno_test and cargo_test; minor UX
+  polish opportunity. See
+  `shakedown/2026-04-13-tier2-smolvm/findings.md`.
+
+### New findings from end-of-day validation
+
+- [ ] **Finding #12** (LOW-MEDIUM) — per-agent budget overrun during
+  long Bash tool calls. Observed $3.15 on $2 budget (57% overrun)
+  when agent was mid-`deno task test`. Cost-guard can't interrupt
+  in-flight subprocess cleanly. Fix direction: kill subprocess
+  process group (not just signal the agent) when budget exceeded.
+- [ ] **Finding #13** (MEDIUM) — `--auto` seeds gates without running
+  them against baseline first. If a baseline gate is broken (e.g.
+  integration test needing a running service), every iteration
+  silently force-discards. Matches Hypothesis #1 in the shakedown
+  brief verbatim. Fix direction: pre-flight seeded gates before
+  iter-1, refuse to start with a helpful message on failure; add
+  `--skip-baseline-check` escape hatch.
+- [?] **Finding #14** (LOW) — polyglot `--auto` seeds gates for every
+  detected language (deno_test + cargo_test). No way to opt-out per
+  language. Minor UX polish if someone wants `--auto-exclude cargo`
+  or similar.
 
 ### Rainy-day: tier-4 pathological
 
