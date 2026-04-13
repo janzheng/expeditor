@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Expeditor — Gates</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'Menlo', monospace; background: #0d1117; color: #c9d1d9; padding: 16px; }
+  h1 { font-size: 14px; color: #8b949e; font-weight: 500; display: inline; }
+  h1 span { color: #58a6ff; }
+  h2 { font-size: 12px; color: #8b949e; font-weight: 500; margin: 24px 0 8px; }
+
+  nav { margin-bottom: 16px; display: flex; align-items: center; gap: 16px; }
+  nav a { font-size: 12px; color: #8b949e; text-decoration: none; padding: 4px 8px; border-radius: 4px; }
+  nav a:hover { background: #21262d; color: #c9d1d9; }
+  nav a.active { background: #21262d; color: #58a6ff; }
+
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .controls input, .controls select {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+    color: #c9d1d9; padding: 6px 8px; font-size: 12px; font-family: inherit;
+  }
+  .controls input { min-width: 300px; }
+  .controls input:focus, .controls select:focus { outline: none; border-color: #58a6ff; }
+  .controls button {
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+    padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    font-family: inherit;
+  }
+  .controls button:hover { background: #30363d; }
+  .controls button.primary { background: #238636; color: #fff; border-color: #2ea043; }
+  .controls button.primary:hover { background: #2ea043; }
+
+  .summary { font-size: 11px; color: #484f58; margin-bottom: 12px; }
+
+  .variant {
+    border: 1px solid #30363d; border-radius: 8px; padding: 12px; background: #161b22;
+    margin-bottom: 10px;
+  }
+  .variant.baseline { border-color: #58a6ff; }
+  .variant-header {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; margin-bottom: 8px;
+  }
+  .variant-id { font-weight: 600; color: #f0f6fc; }
+  .variant-status { font-size: 10px; padding: 2px 6px; border-radius: 8px; background: #30363d; color: #c9d1d9; }
+  .variant-status.baseline { background: #58a6ff; color: #0d1117; }
+  .variant-status.kept { background: #238636; color: #fff; }
+  .variant-status.discarded { background: #6e7681; color: #fff; }
+  .variant-change { font-size: 11px; color: #8b949e; }
+
+  .gate-list { margin-top: 8px; }
+  .gate {
+    font-size: 11px; padding: 6px 8px; border-radius: 4px;
+    background: #0d1117; border: 1px solid #21262d; margin-bottom: 4px;
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+  }
+  .gate-info { flex: 1; overflow: hidden; }
+  .gate-name { color: #f0f6fc; font-weight: 600; }
+  .gate-timeout { color: #d29922; font-size: 10px; margin-left: 6px; }
+  .gate-command {
+    font-size: 10px; color: #8b949e; margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .gate-rationale { font-size: 10px; color: #6e7681; font-style: italic; margin-top: 2px; }
+  .gate-remove {
+    background: #21262d; color: #f85149; border: 1px solid #30363d;
+    padding: 2px 8px; border-radius: 3px; font-size: 10px; cursor: pointer;
+    font-family: inherit; flex-shrink: 0;
+  }
+  .gate-remove:hover { background: #30363d; }
+
+  .no-gates { color: #484f58; font-size: 11px; padding: 4px 0; font-style: italic; }
+
+  .add-form {
+    border: 1px dashed #30363d; border-radius: 8px; padding: 12px;
+    background: #0d1117; margin-top: 8px;
+    display: none;
+  }
+  .add-form.active { display: block; }
+  .add-form .field { margin-bottom: 8px; }
+  .add-form label { font-size: 10px; color: #8b949e; display: block; margin-bottom: 2px; }
+  .add-form input, .add-form textarea {
+    width: 100%; background: #161b22; border: 1px solid #30363d;
+    border-radius: 4px; color: #c9d1d9; padding: 6px 8px; font-size: 12px;
+    font-family: inherit;
+  }
+  .add-form textarea { resize: vertical; min-height: 40px; }
+  .add-form .actions { display: flex; gap: 6px; margin-top: 8px; }
+  .add-gate-btn {
+    font-size: 10px; padding: 4px 8px; border-radius: 3px; cursor: pointer;
+    background: #21262d; border: 1px solid #30363d; color: #8b949e;
+    font-family: inherit; margin-top: 4px;
+  }
+  .add-gate-btn:hover { background: #30363d; color: #c9d1d9; }
+
+  .error { color: #f85149; font-size: 11px; margin: 8px 0; }
+  .success { color: #3fb950; font-size: 11px; margin: 8px 0; }
+  .empty { color: #484f58; font-size: 12px; padding: 40px 0; text-align: center; }
+
+  .auth-banner {
+    background: #1f2428; border: 1px solid #d29922; border-radius: 4px;
+    padding: 8px 12px; font-size: 11px; margin-bottom: 16px; color: #d29922;
+    display: none;
+  }
+  .auth-banner.visible { display: block; }
+  .auth-banner input {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 3px;
+    color: #c9d1d9; padding: 4px 6px; font-size: 11px; margin-left: 8px;
+    min-width: 280px; font-family: inherit;
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <h1><span>expeditor</span></h1>
+  <a href="/">Live</a>
+  <a href="/runs.html">Runs</a>
+  <a href="/permissions.html">Permissions</a>
+  <a href="/costs.html">Costs</a>
+  <a href="/launch.html">Launch</a>
+  <a href="/gates.html" class="active">Gates</a>
+</nav>
+
+<div id="auth-banner" class="auth-banner">
+  <strong>Bearer token needed</strong> to add/remove gates. Paste the token printed at startup:
+  <input id="auth-token-input" type="password" placeholder="expo serve prints this at startup" />
+  <button onclick="saveAuthToken()">Save</button>
+</div>
+
+<div class="controls">
+  <input id="dir-input" type="text" placeholder="Directory with .refine/ archive (e.g. /path/to/project)" />
+  <button class="primary" onclick="loadGates()">Load</button>
+  <span id="summary" class="summary"></span>
+</div>
+
+<div id="variants"></div>
+
+<script>
+// --- Bearer-token handling for mutating routes ---
+// Persists in localStorage so the user only pastes once per browser.
+function getAuthToken() {
+  return localStorage.getItem('expo-auth-token') || '';
+}
+function saveAuthToken() {
+  const tok = document.getElementById('auth-token-input').value.trim();
+  if (tok) {
+    localStorage.setItem('expo-auth-token', tok);
+    document.getElementById('auth-banner').classList.remove('visible');
+  }
+}
+function authHeaders() {
+  const tok = getAuthToken();
+  return tok ? { 'Authorization': 'Bearer ' + tok } : {};
+}
+function showAuthBannerIfMissing() {
+  if (!getAuthToken()) {
+    document.getElementById('auth-banner').classList.add('visible');
+  }
+}
+
+// --- Dir input: remember the last loaded directory ---
+const dirInput = document.getElementById('dir-input');
+dirInput.value = localStorage.getItem('expo-gates-dir') || '';
+
+function currentDir() {
+  const v = dirInput.value.trim();
+  if (v) localStorage.setItem('expo-gates-dir', v);
+  return v;
+}
+
+// --- Main render ---
+async function loadGates() {
+  const dir = currentDir();
+  if (!dir) {
+    document.getElementById('variants').innerHTML = '<div class="empty">Enter a directory above to view gates.</div>';
+    document.getElementById('summary').textContent = '';
+    return;
+  }
+  try {
+    const resp = await fetch('/api/gates?dir=' + encodeURIComponent(dir));
+    const data = await resp.json();
+    if (data.error) {
+      document.getElementById('variants').innerHTML = '<div class="error">' + esc(data.error) + '</div>';
+      document.getElementById('summary').textContent = '';
+      return;
+    }
+    render(data);
+  } catch (e) {
+    document.getElementById('variants').innerHTML = '<div class="error">Request failed: ' + esc(e.message) + '</div>';
+  }
+}
+
+function render(data) {
+  document.getElementById('summary').textContent =
+    data.totalGates + ' gate' + (data.totalGates === 1 ? '' : 's') +
+    ' across ' + data.totalVariants + ' variant' + (data.totalVariants === 1 ? '' : 's');
+
+  const container = document.getElementById('variants');
+  if (data.totalVariants === 0) {
+    container.innerHTML = '<div class="empty">No variants in this archive yet. Run <code>expo refine &lt;dir&gt;</code> to create one.</div>';
+    return;
+  }
+  container.innerHTML = '';
+  for (const v of data.byVariant) {
+    container.appendChild(renderVariant(v));
+  }
+}
+
+function renderVariant(v) {
+  const card = document.createElement('div');
+  card.className = 'variant' + (v.status === 'baseline' ? ' baseline' : '');
+
+  const header = document.createElement('div');
+  header.className = 'variant-header';
+  header.innerHTML =
+    '<div><span class="variant-id">[' + esc(v.variantId) + ']</span> ' +
+    '<span class="variant-status ' + esc(v.status) + '">' + esc(v.status) + '</span></div>' +
+    '<span class="variant-change">' + esc(v.change || v.summary || '') + '</span>';
+  card.appendChild(header);
+
+  const gateList = document.createElement('div');
+  gateList.className = 'gate-list';
+  if (v.gates.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'no-gates';
+    empty.textContent = '(no direct gates — may inherit from ancestors)';
+    gateList.appendChild(empty);
+  } else {
+    for (const g of v.gates) {
+      gateList.appendChild(renderGate(v.variantId, g));
+    }
+  }
+  card.appendChild(gateList);
+
+  // "Add gate" toggle + inline form
+  const addBtn = document.createElement('button');
+  addBtn.className = 'add-gate-btn';
+  addBtn.textContent = '+ add gate';
+  const form = buildAddForm(v.variantId);
+  addBtn.onclick = () => { form.classList.toggle('active'); };
+  card.appendChild(addBtn);
+  card.appendChild(form);
+
+  return card;
+}
+
+function renderGate(variantId, g) {
+  const row = document.createElement('div');
+  row.className = 'gate';
+
+  const info = document.createElement('div');
+  info.className = 'gate-info';
+  let nameHtml = '<span class="gate-name">' + esc(g.name) + '</span>';
+  if (g.timeoutMs) {
+    nameHtml += '<span class="gate-timeout">· timeout ' + (g.timeoutMs / 1000).toFixed(1) + 's</span>';
+  }
+  info.innerHTML = nameHtml +
+    '<div class="gate-command">' + esc(g.command) + '</div>' +
+    (g.rationale ? '<div class="gate-rationale">' + esc(g.rationale) + '</div>' : '');
+  row.appendChild(info);
+
+  const btn = document.createElement('button');
+  btn.className = 'gate-remove';
+  btn.textContent = '× remove';
+  btn.onclick = () => removeGate(variantId, g.name);
+  row.appendChild(btn);
+
+  return row;
+}
+
+function buildAddForm(variantId) {
+  const form = document.createElement('form');
+  form.className = 'add-form';
+  form.innerHTML =
+    '<div class="field"><label>Name</label><input name="name" required placeholder="e.g. tests" /></div>' +
+    '<div class="field"><label>Command</label><input name="command" required placeholder="e.g. deno test --allow-all" /></div>' +
+    '<div class="field"><label>Rationale (optional)</label><textarea name="rationale" placeholder="why this invariant exists"></textarea></div>' +
+    '<div class="field"><label>Timeout ms (optional — overrides global --gate-timeout)</label><input name="timeoutMs" type="number" min="1" placeholder="e.g. 30000" /></div>' +
+    '<div class="actions">' +
+    '  <button type="submit" class="add-gate-btn" style="background:#238636;color:#fff;border-color:#2ea043;">Add</button>' +
+    '  <button type="button" class="add-gate-btn" onclick="this.closest(\'.add-form\').classList.remove(\'active\')">Cancel</button>' +
+    '</div>';
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const timeoutRaw = f.timeoutMs.value.trim();
+    addGate(variantId, {
+      name: f.name.value.trim(),
+      command: f.command.value.trim(),
+      rationale: f.rationale.value.trim() || undefined,
+      timeoutMs: timeoutRaw ? parseInt(timeoutRaw, 10) : undefined,
+    });
+  };
+  return form;
+}
+
+async function addGate(variantId, body) {
+  const dir = currentDir();
+  if (!dir) return;
+  try {
+    const resp = await fetch('/api/gates/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ dir, variantId, ...body }),
+    });
+    const json = await resp.json();
+    if (resp.status === 401) {
+      document.getElementById('auth-banner').classList.add('visible');
+      return;
+    }
+    if (!json.ok) {
+      alert('Failed to add gate: ' + (json.error || 'unknown error'));
+      return;
+    }
+    loadGates();
+  } catch (e) {
+    alert('Request failed: ' + e.message);
+  }
+}
+
+async function removeGate(variantId, name) {
+  if (!confirm('Remove gate "' + name + '" from [' + variantId + ']?')) return;
+  const dir = currentDir();
+  if (!dir) return;
+  try {
+    const resp = await fetch('/api/gates/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ dir, variantId, name }),
+    });
+    const json = await resp.json();
+    if (resp.status === 401) {
+      document.getElementById('auth-banner').classList.add('visible');
+      return;
+    }
+    if (!json.ok) {
+      alert('Failed to remove gate: ' + (json.error || 'unknown error'));
+      return;
+    }
+    loadGates();
+  } catch (e) {
+    alert('Request failed: ' + e.message);
+  }
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Auto-load if we have a saved dir
+showAuthBannerIfMissing();
+if (dirInput.value) loadGates();
+else document.getElementById('variants').innerHTML = '<div class="empty">Enter a directory above to view gates.</div>';
+</script>
+</body>
+</html>

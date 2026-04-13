@@ -122,6 +122,9 @@ interface GateProposal {
   name: string;
   command: string;
   rationale?: string;
+  /** Optional per-gate timeout override in milliseconds. When present,
+   *  overrides the run-level --gate-timeout for this gate only. */
+  timeoutMs?: number;
 }
 
 interface ParsedVerdict {
@@ -1096,6 +1099,14 @@ async function runInheritedGates(
           stderr: "piped",
         }).spawn();
 
+    // Per-gate timeout override: if the gate defines its own timeoutMs,
+    // use that; else fall back to the run-level timeout. Lets long
+    // integration checks coexist with sub-second smoke gates in the
+    // same archive without having to tune a global for the slowest one.
+    const effectiveTimeoutMs = (typeof gate.timeoutMs === "number" && gate.timeoutMs > 0)
+      ? gate.timeoutMs
+      : opts.timeoutMs;
+
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -1112,7 +1123,7 @@ async function runInheritedGates(
       } else {
         try { proc.kill("SIGKILL"); } catch { /* already exited */ }
       }
-    }, opts.timeoutMs);
+    }, effectiveTimeoutMs);
 
     let output;
     try {
@@ -1468,6 +1479,12 @@ function tryParseFencedVerdict(output: string): ParsedVerdict | null {
       if (typeof pr.rationale === "string" && pr.rationale.length > 0) {
         proposal.rationale = pr.rationale;
       }
+      // Per-gate timeout in ms or seconds — mirror the loadGateFile ergonomics.
+      if (typeof pr.timeoutMs === "number" && pr.timeoutMs > 0 && Number.isFinite(pr.timeoutMs)) {
+        proposal.timeoutMs = Math.floor(pr.timeoutMs);
+      } else if (typeof pr.timeoutSec === "number" && pr.timeoutSec > 0 && Number.isFinite(pr.timeoutSec)) {
+        proposal.timeoutMs = Math.floor(pr.timeoutSec * 1000);
+      }
       gateProposals.push(proposal);
     }
   }
@@ -1502,6 +1519,13 @@ function parseGateProposalLine(payload: string): GateProposal | null {
     };
     if (typeof parsed.rationale === "string" && parsed.rationale.length > 0) {
       proposal.rationale = parsed.rationale;
+    }
+    // Accept per-gate timeout in ms or seconds (timeoutSec) — same ergonomic
+    // coercion as loadGateFile, since agents write both forms organically.
+    if (typeof parsed.timeoutMs === "number" && parsed.timeoutMs > 0 && Number.isFinite(parsed.timeoutMs)) {
+      proposal.timeoutMs = Math.floor(parsed.timeoutMs);
+    } else if (typeof parsed.timeoutSec === "number" && parsed.timeoutSec > 0 && Number.isFinite(parsed.timeoutSec)) {
+      proposal.timeoutMs = Math.floor(parsed.timeoutSec * 1000);
     }
     return proposal;
   } catch {
@@ -1978,8 +2002,8 @@ export async function removeRefineGate(
 /** Shape accepted by `loadGateFile`. A flat array is the minimum; object
  *  form leaves room for future metadata (e.g. `{version: 1, gates: [...]}`). */
 export type GateFileShape =
-  | Array<{ name: string; command: string; rationale?: string }>
-  | { gates: Array<{ name: string; command: string; rationale?: string }> };
+  | Array<{ name: string; command: string; rationale?: string; timeoutMs?: number }>
+  | { gates: Array<{ name: string; command: string; rationale?: string; timeoutMs?: number }> };
 
 /**
  * Read + validate a gate config JSON file. Used by `expo refine --gate-file
@@ -1997,7 +2021,7 @@ export type GateFileShape =
  */
 export async function loadGateFile(
   path: string,
-): Promise<Array<{ name: string; command: string; rationale?: string }>> {
+): Promise<Array<{ name: string; command: string; rationale?: string; timeoutMs?: number }>> {
   let raw: string;
   try {
     raw = await Deno.readTextFile(path);
@@ -2022,7 +2046,7 @@ export async function loadGateFile(
     throw new Error(`gate file ${path}: expected array of {name, command, rationale?} or {gates: [...]}`);
   }
 
-  const result: Array<{ name: string; command: string; rationale?: string }> = [];
+  const result: Array<{ name: string; command: string; rationale?: string; timeoutMs?: number }> = [];
   const rawArr = arr as unknown[];
   for (let i = 0; i < rawArr.length; i++) {
     const entry = rawArr[i];
@@ -2036,12 +2060,19 @@ export async function loadGateFile(
     if (typeof g.command !== "string" || g.command.trim().length === 0) {
       throw new Error(`gate file ${path}[${i}] (name=${g.name}): missing or empty "command"`);
     }
-    const gate: { name: string; command: string; rationale?: string } = {
+    const gate: { name: string; command: string; rationale?: string; timeoutMs?: number } = {
       name: g.name.trim(),
       command: g.command.trim(),
     };
     if (typeof g.rationale === "string" && g.rationale.trim().length > 0) {
       gate.rationale = g.rationale.trim();
+    }
+    // Per-gate timeout override. Coerce from seconds if users supplied
+    // `timeoutSec` (common mistake); otherwise treat `timeoutMs` as ms.
+    if (typeof g.timeoutMs === "number" && g.timeoutMs > 0 && Number.isFinite(g.timeoutMs)) {
+      gate.timeoutMs = Math.floor(g.timeoutMs);
+    } else if (typeof g.timeoutSec === "number" && g.timeoutSec > 0 && Number.isFinite(g.timeoutSec)) {
+      gate.timeoutMs = Math.floor(g.timeoutSec * 1000);
     }
     result.push(gate);
   }
@@ -2437,6 +2468,12 @@ export async function checkRefineGates(
           stderr: "piped",
         }).spawn();
 
+    // Per-gate timeout override — same semantics as runInheritedGates.
+    // `timeoutMs` (the --timeout flag to `gate check`) is the fallback.
+    const effectiveTimeoutMs = (typeof gate.timeoutMs === "number" && gate.timeoutMs > 0)
+      ? gate.timeoutMs
+      : timeoutMs;
+
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -2451,7 +2488,7 @@ export async function checkRefineGates(
       } else {
         try { proc.kill("SIGKILL"); } catch { /* already exited */ }
       }
-    }, timeoutMs);
+    }, effectiveTimeoutMs);
 
     let output: Deno.CommandOutput;
     try {

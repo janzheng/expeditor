@@ -73,6 +73,53 @@ export class ConcurrencyLimit {
     }
   }
 
+  /**
+   * "Waiting-set" variant: release the CURRENT slot for the duration of
+   * `fn`, then re-acquire before returning. MUST be called from inside
+   * a `run()` — there must be a slot to release.
+   *
+   * The use case is hierarchical fan-out: a parent task that's holding
+   * a slot wants to AWAIT nested work on the SAME semaphore (e.g. a
+   * workflow stage spawning its own race). Without this, `max` slots
+   * of parents all blocked on children would monopolize the pool and
+   * their children would never run — textbook starvation.
+   *
+   * With runWaiting:
+   *   - parent releases its slot ("moves to waiting set")
+   *   - children run, possibly triggering more fan-out
+   *   - parent re-acquires when its children resolve ("re-enters running")
+   *
+   * The slot is re-acquired even if `fn` throws — caller sees the
+   * exception, the parent resumes holding a slot so its caller's
+   * `run()` `finally` can release it cleanly.
+   *
+   * Flat fan-outs (race/workflow/mxit today) don't need this — each
+   * task is a leaf spawn. The primitive exists for the moment expo grows
+   * nested orchestration (e.g. workflow stages that invoke race), so the
+   * deadlock doesn't have to be re-discovered the hard way.
+   */
+  async runWaiting<T>(fn: () => Promise<T>): Promise<T> {
+    // Release the slot we're presumed to hold. A caller who invokes this
+    // without holding a slot will underflow `running` — which is a bug
+    // in their code, but we surface it clearly rather than silently
+    // corrupting the counter.
+    if (this.#running <= 0) {
+      throw new Error(
+        "ConcurrencyLimit.runWaiting called without holding a slot " +
+          "(must be invoked from inside a run() callback)",
+      );
+    }
+    this.#release();
+    try {
+      return await fn();
+    } finally {
+      // Re-acquire before returning — if all slots are full we wait in
+      // the FIFO queue just like a fresh run() caller. This is correct:
+      // a returning parent has no priority over freshly-submitted work.
+      await this.#acquire();
+    }
+  }
+
   #acquire(): Promise<void> {
     if (this.#running < this.max) {
       this.#running++;

@@ -178,6 +178,8 @@ const MUTATING_ROUTES: ReadonlySet<string> = new Set([
   "/api/review",
   "/api/permissions/approve",
   "/api/permissions/reject",
+  "/api/gates/add",
+  "/api/gates/remove",
 ]);
 
 /** Generate a random bearer token. 32 hex chars = 128 bits of entropy —
@@ -315,6 +317,21 @@ export async function startServer(opts: ServeOptions): Promise<void> {
     // --- API: Cost summary ---
     if (url.pathname === "/api/costs") {
       return await handleCostSummary(logsDir);
+    }
+
+    // --- API: Gates ---
+    // GET /api/gates?dir=<path>                — list all gates in the archive
+    // GET /api/gates?dir=<path>&variantId=<id> — inherited gates for a variant
+    if (url.pathname === "/api/gates" && req.method === "GET") {
+      const dir = url.searchParams.get("dir");
+      const variantId = url.searchParams.get("variantId") ?? undefined;
+      return await handleListGates(dir, variantId);
+    }
+    if (url.pathname === "/api/gates/add" && req.method === "POST") {
+      return await handleAddGate(await req.json());
+    }
+    if (url.pathname === "/api/gates/remove" && req.method === "POST") {
+      return await handleRemoveGate(await req.json());
     }
 
     // --- API: Launch agents ---
@@ -487,6 +504,162 @@ async function handleRejectPermission(pattern: string): Promise<Response> {
   const { mutatePermissionLedger } = await import("./permission-ledger.ts");
   await mutatePermissionLedger((ledger) => { ledger.reject(pattern); });
   return new Response(JSON.stringify({ ok: true, pattern, status: "rejected" }), { headers: JSON_HEADERS });
+}
+
+// --- Gate Handlers ---
+//
+// These delegate to @snapshot/core primitives + refine.ts helpers. The
+// dashboard calls these from gates.html — orchestrators can hit them
+// directly too, same as the CLI subcommands.
+//
+// Note: `dir` is taken as-is from the query. The dashboard binds loopback
+// by default, so path-traversal isn't a cross-user concern; the user is
+// already running arbitrary code as themselves. Validation focuses on
+// giving useful errors (missing .refine/, bad variantId) rather than
+// sandboxing.
+
+async function handleListGates(
+  dir: string | null,
+  variantId: string | undefined,
+): Promise<Response> {
+  if (!dir) {
+    return new Response(
+      JSON.stringify({ error: "dir query parameter is required" }),
+      { status: 400, headers: JSON_HEADERS },
+    );
+  }
+  try {
+    const { init, list, listGates, collectGates } = await import("@snapshot/core");
+    await init(dir);
+    const variants = await list(dir);
+
+    if (variantId) {
+      const target = variants.find((v) => v.id === variantId);
+      if (!target) {
+        return new Response(
+          JSON.stringify({ error: `variant ${variantId} not found` }),
+          { status: 404, headers: JSON_HEADERS },
+        );
+      }
+      const direct = await listGates(dir, variantId);
+      const inherited = await collectGates(dir, variantId);
+      const directNames = new Set(direct.map((g) => g.name));
+      return new Response(
+        JSON.stringify({
+          variantId,
+          gates: inherited.map((g) => ({
+            name: g.name,
+            command: g.command,
+            rationale: g.rationale ?? null,
+            addedBy: g.addedBy,
+            addedAt: g.addedAt,
+            timeoutMs: g.timeoutMs ?? null,
+            source: directNames.has(g.name) ? "direct" : "inherited",
+          })),
+        }),
+        { headers: JSON_HEADERS },
+      );
+    }
+
+    // Whole-archive view: list every variant with its direct gates, plus a
+    // flat summary so the UI can show counts without iterating client-side.
+    const byVariant = variants.map((v) => ({
+      variantId: v.id,
+      status: v.status,
+      change: v.change ?? "",
+      summary: v.summary ?? "",
+      gates: (v.gates ?? []).map((g) => ({
+        name: g.name,
+        command: g.command,
+        rationale: g.rationale ?? null,
+        timeoutMs: g.timeoutMs ?? null,
+      })),
+    }));
+    const totalGates = byVariant.reduce((n, v) => n + v.gates.length, 0);
+    return new Response(
+      JSON.stringify({
+        totalGates,
+        totalVariants: variants.length,
+        byVariant,
+      }),
+      { headers: JSON_HEADERS },
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: String(err instanceof Error ? err.message : err).slice(0, 400) }),
+      { status: 500, headers: JSON_HEADERS },
+    );
+  }
+}
+
+async function handleAddGate(body: Record<string, unknown>): Promise<Response> {
+  const dir = typeof body.dir === "string" ? body.dir : "";
+  const variantId = typeof body.variantId === "string" ? body.variantId : "";
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  const command = typeof body.command === "string" ? body.command.trim() : "";
+  const rationale = typeof body.rationale === "string" && body.rationale.trim()
+    ? body.rationale.trim()
+    : undefined;
+  const timeoutMs = typeof body.timeoutMs === "number" && body.timeoutMs > 0 && Number.isFinite(body.timeoutMs)
+    ? Math.floor(body.timeoutMs)
+    : undefined;
+
+  if (!dir || !variantId || !name || !command) {
+    return new Response(
+      JSON.stringify({
+        error: "dir, variantId, name, command are all required",
+      }),
+      { status: 400, headers: JSON_HEADERS },
+    );
+  }
+
+  try {
+    const { init, addGate } = await import("@snapshot/core");
+    await init(dir);
+    const gate = await addGate(dir, variantId, {
+      name,
+      command,
+      ...(rationale ? { rationale } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    });
+    return new Response(
+      JSON.stringify({ ok: true, gate }),
+      { headers: JSON_HEADERS },
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: String(err instanceof Error ? err.message : err).slice(0, 400) }),
+      { status: 400, headers: JSON_HEADERS },
+    );
+  }
+}
+
+async function handleRemoveGate(body: Record<string, unknown>): Promise<Response> {
+  const dir = typeof body.dir === "string" ? body.dir : "";
+  const variantId = typeof body.variantId === "string" ? body.variantId : "";
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+
+  if (!dir || !variantId || !name) {
+    return new Response(
+      JSON.stringify({ error: "dir, variantId, name are all required" }),
+      { status: 400, headers: JSON_HEADERS },
+    );
+  }
+
+  try {
+    const { init, removeGate } = await import("@snapshot/core");
+    await init(dir);
+    await removeGate(dir, variantId, name);
+    return new Response(
+      JSON.stringify({ ok: true, variantId, name }),
+      { headers: JSON_HEADERS },
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: String(err instanceof Error ? err.message : err).slice(0, 400) }),
+      { status: 400, headers: JSON_HEADERS },
+    );
+  }
 }
 
 async function handleCostSummary(logsDir: string): Promise<Response> {

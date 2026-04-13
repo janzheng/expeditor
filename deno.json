@@ -1,6 +1,6 @@
 {
   "name": "@expeditor/expo",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "exports": "./src/cli.ts",
   "imports": {
     "@mxit/parser": "../fold/src/mod.ts",

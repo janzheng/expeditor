@@ -2,9 +2,10 @@
 
 Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DESIGN.md](TASKS-DESIGN.md) for why/how.
 
-**Status:** v0.2.8 shipped. 19 source files, ~8,900 lines. 534+ unit tests across 25 focused test files + 19 snapshot-package tests. Gate-ratchet ecosystem now includes emergent consensus promotion + repeatable `--gate-file` configs. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand + `--auto` zero-config). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. Staggered kill-wave + bus drain on cost-guard overrun. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed.
+**Status:** v0.2.9 shipped. 19 source files, ~9,400 lines. 638+ unit tests across 28 focused test files + 19 snapshot-package tests. Gate-ratchet: check, file-load, promotion, per-gate timeout, dashboard UI. Concurrency: bounded fan-out + waiting-set semantics. Every `[?]` open question except Brigade's auth/smolvm/deferred ones is now shipped. 5 agent types. Permission ledger. Domain filtering. Multi-agent sandbox. Web dashboard (auth-gated, 127.0.0.1 default). Snapshot integration (gate ratchet + HEAD tracking + scope control + pre-flight `gate check` + heuristics subcommand + `--auto` zero-config). Resilience guards. Concurrency semaphore on fan-outs. Per-run wall-clock cap. Structured `--json` output + `--event-file` JSONL tail. Fenced `<verdict>` grammar. Gate-failure feedback loop. Staggered kill-wave + bus drain on cost-guard overrun. All 16 findings from .brief/agentic-audit.md shipped; all 30 items in TASKS-AUDIT.md closed.
 
 **Recent milestones:**
+- `v0.2.9` (2026-04-13) — per-gate timeout + dashboard gate UI + waiting-set concurrency (three more `[?]` questions shipped)
 - `v0.2.8` (2026-04-13) — `--gate-file` JSON config loader + gate promotion (emergent consensus → root gate)
 - `v0.2.7` (2026-04-13) — `--format json` / `--json` on gate list, --tree, --status (structured output for orchestrators)
 - `v0.2.6` (2026-04-13) — crash resumability via `.refine/inflight.json` + discard-path cleanup of agent-created stragglers
@@ -132,8 +133,8 @@ Research context (in `/Users/janzheng/Desktop/Projects/__resources/github-repos/
 
 - [x] [shipped 2026-04-13: findPromotionCandidates + promoteGatesIfWarranted. Counts direct attachments of each (name, command) tuple across non-root variants. At/above threshold → attach to root with `auto-promoted from N descendants` rationale, remove from descendants. `--gate-promote-threshold N` flag (default 3, 0 disables). Emits `gate_promoted` progress signal. Runs after every attachProposedGates call. 21 unit tests in tests/test-refine-gate-promotion.ts.] Gate promotion — auto-move a gate up the tree when N descendants independently add the same-named gate
 - [x] [shipped 2026-04-13: `--gate-file PATH` loads JSON gate configs. Accepts flat array OR `{gates: [...]}` object form. Merges with `--gate` flags via dedupeGatesByName (file loads first, flags override on name collision). loadGateFile throws with pointed error messages on missing file / bad JSON / wrong root shape / missing-name / missing-command. 27 unit tests in tests/test-refine-gate-file.ts.] `--gate-file <path>` flag — load multiple gates from a YAML/JSON file for repeatable configurations
-- [?] Dashboard gate UI — list gates per variant, show which inherited, manual add/remove from browser
-- [?] Timeout per-gate (currently one global `--gate-timeout` for all gates)
+- [x] [shipped 2026-04-13: /gates.html page + 3 API endpoints (GET /api/gates, POST /api/gates/add, POST /api/gates/remove). Whole-archive view OR per-variant inherited view with source tags (direct/inherited). Add form supports name/command/rationale/timeoutMs. Bearer-token auth via localStorage so dashboard only prompts once. Nav link added to all 5 existing pages. 32 end-to-end HTTP tests in tests/test-web-gates-api.ts.] Dashboard gate UI — list gates per variant, show which inherited, manual add/remove from browser
+- [x] [shipped 2026-04-13: optional `timeoutMs?: number` field on Gate. runInheritedGates + checkRefineGates use `gate.timeoutMs ?? global` as the deadline. Exposed via gate-file (accepts `timeoutMs` OR `timeoutSec` for ergonomics), GATE_PROPOSAL JSON, fenced <verdict> gate_proposals, and POST /api/gates/add. Invalid values (zero/negative/NaN/Infinity) dropped. addGate only stores the field when positive so manifest stays compact. 21 unit tests in tests/test-refine-per-gate-timeout.ts.] Timeout per-gate (currently one global `--gate-timeout` for all gates)
 
 ## Agentic UX + Audit #agentic-ux
 
@@ -219,8 +220,7 @@ Sourced from `/Users/janzheng/Desktop/Projects/_deno/apps/brigade/.brief/`. Brig
   - [*] Log what users always approve → auto-delegate rubber-stamp actions headlessly. See `brigade/.brief/permission-log-autodelegation.md`
 - [?] Isolated worktrees — combine git worktrees + VM isolation for parallel code editing #isolation #future
   - [*] Relevant if expo adds smolvm support. See `brigade/.brief/isolated-worktrees.md`
-- [?] Fan-out `submitAndWait()` with waiting-set concurrency accounting #orchestrator #future
-  - [*] Formalize waiting vs running slots so parent blocked on children doesn't consume concurrency. See `brigade/.brief/fan-out-api.md`
+- [x] [shipped 2026-04-13: ConcurrencyLimit.runWaiting(fn) — releases current slot for the duration of fn, re-acquires after. Throws if called without holding a slot (bug-surfacing guard). Solves the hierarchical deadlock: max=2, two parents each awaiting a child on the same pool → without runWaiting, deadlock; with it, everyone finishes. Exception-safe (re-acquires even if fn throws). FIFO queue respected. 29 unit tests in tests/test-concurrency-waiting.ts. Flat fan-outs (race/workflow/mxit) don't need it today but the primitive is ready for nested orchestration.] Fan-out `submitAndWait()` with waiting-set concurrency accounting #orchestrator #future
 
 ## Later
 
