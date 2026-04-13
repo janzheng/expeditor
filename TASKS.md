@@ -132,9 +132,9 @@ Lens: **expo as a tool LLM agents reach for, not just humans at a terminal.** Co
 
 ### Audit pass
 
-- [x] [done: 16 verified findings — 3 P1, 10 P2, 3 P3 — in .brief/agentic-audit.md; $1.80, 23 turns, 288s] Run speed / security / agentic-UX audit on expo source `-> .brief/agentic-audit.md` #audit #agentic-ux
-  - [*] Confirms several pre-existing open items from TASKS-AUDIT.md (A017 workflow silent success; A022 withTimeout kill gap) are still real
-  - [*] Biggest new finding: `expo serve` P1 — unauthenticated POST /api/spawn binds 0.0.0.0, any browser tab can launch arbitrary commands
+- [x] [done 2026-04-12: 16 verified findings — 3 P1, 10 P2, 3 P3 — in .brief/agentic-audit.md; $1.80, 23 turns, 288s. ALL 16 findings subsequently closed out across 4 refine sessions + direct implementation for a total of ~$17 and 263+ regression tests. See REFINE.md Sessions 1-4 for per-iteration logs] Run speed / security / agentic-UX audit on expo source `-> .brief/agentic-audit.md` #audit #agentic-ux
+  - [*] Biggest new finding: `expo serve` P1 — unauthenticated POST /api/spawn binds 0.0.0.0, any browser tab can launch arbitrary commands (closed in 9b215e4)
+  - [*] Confirmed pre-existing open items from TASKS-AUDIT.md (A017 workflow silent success; A022 withTimeout kill gap) were still real and now fixed
 
 ### Priority 1 — do first (from audit findings + unblock unattended runs)
 
@@ -161,6 +161,10 @@ Audit-driven + wishlist P1s:
 - [x] [fixed by expo refine iter-010: bus.offline getter + onStatus(cb) subscription; emit() returns boolean (false=dropped). tests/test-bus-offline-signal.ts (21 checks)] bus.ts rotation silently drops signals `-> .brief/agentic-audit.md` #bus #silent-failure
 - [x] [fixed by expo refine iter-011: in-memory task cache with mtime-based invalidation; findTaskByLine + updateCachedStatus exported. tests/test-mxit-cache.ts (14 checks)] mxit re-parses TASKS.md every iteration `-> .brief/agentic-audit.md` #mxit #speed
 - [x] [fixed: src/web.ts handleGetRun now Deno.realPath both logsDir + request, asserts prefix. Also rejects `\\` in filename] Symlink bypass in log serving `-> .brief/agentic-audit.md` #security #serve
+- [x] [fixed by expo refine iter-018: src/claude-adapter.ts — exported pure buildBashDenialPattern helper; stores raw tool-input command string; no more whitespace split. tests/test-claude-denial-pattern.ts (35 checks)] Claude adapter lossy Bash-command parse `-> .brief/agentic-audit.md` #adapter #parsing
+- [x] [fixed by expo refine iter-013: src/spawner.ts — exported isValidAllowedDomain + assertValidAllowedDomains with RFC-1123 regex; refuses bash metacharacters before interpolation. tests/test-domain-filter-injection.ts (37 checks)] Domain filter bash injection `-> .brief/agentic-audit.md` #security #spawner
+- [x] [fixed by expo refine iter-019: src/permission-ledger.ts — process-wide singleton with async write queue serializing concurrent approve/reject; src/web.ts uses shared instance. tests/test-permission-ledger-singleton.ts (13 checks)] Permission HTTP endpoints ledger race `-> .brief/agentic-audit.md` #race #permissions
+- [x] [fixed by expo refine iter-021: src/web.ts — pure parseRunStats(content) helper + {mtime,size} cache backs handleListRuns + handleCostSummary; two legacy cost shapes both preserved. tests/test-run-stats-cache.ts (35 checks)] Web endpoints full-rescan per request `-> .brief/agentic-audit.md` #speed #web
 - [ ] `--json` flag on `expo refine` result `-> TASKS-AGENTIC-UX.md` #agentic-ux #output
 - [ ] Pass gate-failure context into next iteration's prompt `-> TASKS-AGENTIC-UX.md` #feedback #gates
 - [ ] Token-efficient formats (TOON / compact) for gate list, --tree, --status `-> TASKS-AGENTIC-UX.md` #agentic-ux #toon

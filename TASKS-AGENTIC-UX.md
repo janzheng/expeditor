@@ -79,6 +79,28 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 - [x] [fixed 2026-04-12: snapshot() gained `addPaths?: string[]`; refine.ts records git status --porcelain before/after agent spawn, passes the diff as addPaths. Validated live during audit-leaks session — refine/008-011 all stayed scoped, my parallel f278b4d web.ts symlink fix remained a separate clean commit] snapshot() does `git add -A` — scoops uncommitted work into refine/NNN commits #bug #snapshot
 
+- [x] [fixed 2026-04-12: findScopeViolations now exempts 12 lockfile names across ecosystems. Covered by +5 scope tests. Validated live during cleanup-2 session — iters that auto-updated deno.lock no longer got wrongly discarded] Scope check wrongly flagged lockfiles — toolchain side-effects counted as scope violations #bug #scope
+
+- [ ] Concurrency semaphore on fan-outs (race/workflow/mxit/spawn-all) #safety #agentic-ux #future
+  - [*] Currently no limit — unbounded Promise.allSettled across 3 paths (orchestrator.ts:347, mxit-runner.ts:442, workflow.ts:332). 1000 ready mxit tasks = 1000 concurrent claude processes. Today the only defenses are reactive: costGuard kills agents over budget, maxToolCalls kills per-agent thrashers.
+  - [*] Fix: ConcurrencyLimit class in src/concurrency.ts with acquire/release semaphore. Wrap FULL lifecycle (spawn + wait), not just wait — otherwise pre-allocating 1000 worktrees + network connections before ANY agents start.
+  - [*] Surface: --max-concurrent N CLI flag on race, workflow, mxit, spawn-all. Default 5 (matches refine's subagent recommendation).
+  - [*] Rationale: user explicitly flagged during session — "is there some kind of async sema that prevents 1000 agents." No. This is a real safety-rail gap.
+
+- [ ] Diff-based agent-touched-paths misses files from prior discarded iterations #bug #refine
+  - [*] cleanup-2 iter-3 self-discarded but left tests/test-run-stats-cache.ts in the working tree. Iter-4's pre-spawn listDirtyPaths saw the file as already-dirty, so when iter-4 legitimately recreated it, the file was filtered out of agentTouchedPaths. Ended up committed-loose (had to manually stage).
+  - [*] Two possible fixes: (a) after discard, clear non-scope-essential working-tree files too; (b) track "what was legitimately created this iteration" more precisely via timestamps or file-watcher rather than dirty-set difference.
+  - [*] Benign as-is — straggler is easy to spot and commit separately. But worth logging so it doesn't surprise anyone.
+
+- [ ] Stagger process kills in costGuard.killAllRunning #safety #bus
+  - [*] Total-budget overrun triggers killAllRunning which loops sending SIGTERM to every running agent's process group in a tight for-loop. In a fan-out scenario this signals dozens of processes at once — they all die in unison, pipe flushes, bus contention, brief CPU spike.
+  - [*] User noticed a 100% CPU spike during session 3 when this fired
+  - [*] Fix: small delay between kills, OR Promise.all with concurrency cap. Not a correctness bug — just a politeness one.
+
+- [ ] Drain bus pending writes before costGuard kills agents #bus #safety
+  - [*] When kill-wave hits, dying agents flush stdout/stderr through pipes expo holds open, while the cost-guard is also trying to emit its `budget_exceeded` signal. If bus is rotating when this happens, pendingWrites can stack up quickly.
+  - [*] Pairs with the stagger fix above. Both are about making the kill path less lumpy.
+
 ## Notes and connections
 
 - The `gate check` and wall-clock timeout items unblock "unattended overnight" use cases. Without them, refine is only trustworthy for watched short runs.
