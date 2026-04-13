@@ -103,10 +103,20 @@ export interface RefineOptions {
    *  Matched against paths returned by `git status --porcelain` during
    *  the agent run. Glob semantics match Deno std's `globToRegExp`. */
   scope?: string[];
+
+  /** Skip the pre-run stale-baseline check (shakedown Finding #4).
+   *
+   *  By default, if the working tree has diverged from the snapshot
+   *  tag of the last kept variant, refine refuses to start — because
+   *  the first discard would silently rewind the tree, destroying
+   *  work that wasn't captured in the snapshot tree. Set this to
+   *  accept the rewind explicitly (e.g. for resume flows where drift
+   *  is expected). */
+  forceStaleBaseline?: boolean;
 }
 
 export interface RefineResult {
-  verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED" | "WALL_CLOCK_EXCEEDED";
+  verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED" | "WALL_CLOCK_EXCEEDED" | "INFRA_FAILURE";
   iterations: number;
   totalCostUsd: number;
   keptVariants: number;
@@ -116,6 +126,29 @@ export interface RefineResult {
   gateFailures: number;
   /** Count of gates the agent proposed (0 if `allowAgentGates` is off). */
   gatesProposed: number;
+  /** Count of iterations whose output looked like an infrastructure error
+   *  (API 5xx, network timeout) rather than a semantic discard. Not counted
+   *  toward consecutive-discard branching. Fixes shakedown Finding #3. */
+  infraFailures?: number;
+}
+
+/** Classify an agent's output as infrastructure failure vs semantic output.
+ *  Used to avoid counting API 5xx / network errors as "discards" for the
+ *  consecutive-discard branching and cost-per-keep metrics. Exported for
+ *  test coverage. */
+export function isInfraFailure(output: string): boolean {
+  if (!output) return false;
+  // Anthropic API 5xx / overloaded — the most common case on long runs.
+  if (/API Error:\s*5\d{2}/.test(output)) return true;
+  if (/"type":\s*"api_error"/.test(output)) return true;
+  if (/"type":\s*"overloaded_error"/.test(output)) return true;
+  // Network-layer failures the spawner surfaces as output. Conservative
+  // match — these are unlikely to appear in legitimate rubric-violation
+  // prose; if the agent is quoting one it'll also produce structured
+  // verdict lines and we'd rather mis-classify as infra (safer) than
+  // as semantic.
+  if (/ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed/.test(output)) return true;
+  return false;
 }
 
 interface GateProposal {
@@ -139,6 +172,7 @@ interface ParsedVerdict {
 // ── Constants ──────────────────────────────────────────────────
 
 const MAX_CONSECUTIVE_DISCARDS = 3;
+const MAX_CONSECUTIVE_INFRA_FAILURES = 3;
 const ARCHIVE_CONTEXT_COUNT = 5;
 const REFINE_MD = "REFINE.md";
 /** Default threshold for gate promotion: this many independent direct
@@ -438,6 +472,67 @@ async function readStdinLine(): Promise<string> {
   return new TextDecoder().decode(buf.subarray(0, n)).trim();
 }
 
+/** Drift info for the stale-baseline check (shakedown Finding #4).
+ *  Non-null means the working tree has moved since the last-kept
+ *  variant's snapshot. The first discard during the refine loop will
+ *  reset the tree to the snapshot state, so this delta is effectively
+ *  at-risk work. */
+export interface SnapshotDrift {
+  variantId: string;
+  tag: string;
+  /** Parsed `git diff --stat refine/<id>` — empty string means clean. */
+  summary: string;
+  filesChanged: number;
+  linesAdded: number;
+  linesRemoved: number;
+}
+
+/** Compare the current working tree against the snapshot tag for
+ *  `variantId`. Returns null when there's no drift or when the check
+ *  can't be performed (non-git repo, tag missing). */
+export async function detectSnapshotDrift(
+  dir: string,
+  variantId: string,
+): Promise<SnapshotDrift | null> {
+  try {
+    const tag = `refine/${variantId}`;
+    // Verify tag exists — silent null if this variant's snapshot isn't tagged.
+    const tagCheck = await new Deno.Command("git", {
+      args: ["rev-parse", "--verify", tag],
+      cwd: dir,
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    if (!tagCheck.success) return null;
+
+    // --stat gives us a human-readable summary + trailing totals line.
+    const diff = await new Deno.Command("git", {
+      args: ["diff", "--stat", tag, "--", "."],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (!diff.success) return null;
+    const summary = new TextDecoder().decode(diff.stdout).trim();
+    if (!summary) return null;
+
+    // Parse the trailing " N files changed, A insertions(+), R deletions(-)" line.
+    const totalsMatch = summary.match(
+      /(\d+)\s+files?\s+changed(?:,\s*(\d+)\s+insertions?\(\+\))?(?:,\s*(\d+)\s+deletions?\(-\))?/,
+    );
+    return {
+      variantId,
+      tag,
+      summary,
+      filesChanged: Number(totalsMatch?.[1] ?? 0),
+      linesAdded: Number(totalsMatch?.[2] ?? 0),
+      linesRemoved: Number(totalsMatch?.[3] ?? 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ── Main refine loop ───────────────────────────────────────────
 
 export async function refine(
@@ -484,6 +579,52 @@ export async function refine(
     await restore(dir, opts.branchFrom);
   }
 
+  // 2c. Stale-baseline check (shakedown Finding #4). If the working tree
+  //     has drifted from the last-kept variant's snapshot (because the
+  //     user made commits or uncommitted edits since the last refine run),
+  //     the first discard will rewind the tree and silently destroy that
+  //     work. Detect + refuse-by-default with a clear recovery path.
+  //     Skipped on fresh repos (< 2 variants) where no "last kept" exists.
+  if (!opts.forceStaleBaseline && variants.length > 1) {
+    const headKeptId = getLastKeptId(variants) ?? "000";
+    const drift = await detectSnapshotDrift(dir, headKeptId);
+    if (drift && drift.filesChanged > 0) {
+      console.error(`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠  STALE BASELINE — refine refuses to start
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The working tree has drifted from the last-kept refine variant.
+Since every discard restores to that variant's snapshot, the first
+iteration that discards would rewind away your changes.
+
+  Last-kept variant:  [${drift.variantId}] (tag ${drift.tag})
+  Drift:              ${drift.filesChanged} file(s), +${drift.linesAdded}/-${drift.linesRemoved} lines
+
+What changed since the snapshot (summary):
+${drift.summary.split("\n").slice(-5).map((l) => "  " + l).join("\n")}
+
+To proceed, pick one:
+
+  1. Commit or stash your work, then run refine again.
+     Everything you've done will be preserved in git.
+
+  2. Re-run with --force-stale-baseline to accept the rewind.
+     Your tree WILL be reset to [${drift.variantId}] on the first discard.
+     Any uncommitted changes will be lost. Committed changes are
+     recoverable via 'git reflog' but will disappear from HEAD.
+
+  3. Promote your current state as the new baseline. For now, this
+     means manually: snapshot with 'expo refine . --max 1 --rubric
+     "promote current state as new variant"', then re-run refine.
+     (A dedicated --reset-to-head flag is planned.)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`);
+      throw new Error(`refine: stale baseline — use --force-stale-baseline to override`);
+    }
+  }
+
   // Read REFINE.md heuristics if it exists
   const refineHeuristics = await readRefinemd(dir);
 
@@ -493,6 +634,12 @@ export async function refine(
   // Counters for the result summary
   let gateFailures = 0;
   let gatesProposed = 0;
+  // Infra-failure tracking (shakedown Finding #3). Counts API 5xx /
+  // network errors separately from semantic discards. Consecutive count
+  // drives an early-exit after MAX_CONSECUTIVE_INFRA_FAILURES (3) to
+  // avoid burning budget on a persistent upstream outage.
+  let infraFailures = 0;
+  let consecutiveInfraFailures = 0;
   const gateTimeoutMs = (opts.gateTimeout ?? 60) * 1000;
 
   // Gate-failure feedback ring: keep the last few gate-broken attempts so we
@@ -561,7 +708,7 @@ export async function refine(
       finalVariantId = getLastKeptId(variants) ?? "000";
       await updateRefineMd(bus, spawner, dir, variants, opts);
       await clearInflight(dir);
-      return buildResult("WALL_CLOCK_EXCEEDED", iterations - 1, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+      return buildResult("WALL_CLOCK_EXCEEDED", iterations - 1, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
     }
 
     // Refresh variant list
@@ -631,7 +778,36 @@ export async function refine(
       ? [...postAgentDirty].filter((p) => !preAgentDirty.has(p))
       : undefined;
 
-    // e. Parse verdict
+    // e. Classify infra failure vs semantic output (shakedown Finding #3).
+    //    API 5xx / network errors get their own bucket — they don't count
+    //    toward consecutive-discard branching OR cost-per-keep quality
+    //    signals, and N in a row means we exit early instead of burning
+    //    more budget on a persistent outage.
+    if (isInfraFailure(result.output)) {
+      infraFailures++;
+      consecutiveInfraFailures++;
+      await emitRefineProgress(bus, agentName, iterations,
+        `infra_failure: ${result.output.slice(0, 120).replace(/\s+/g, " ").trim()}`,
+        { infraFailure: true, consecutiveInfraFailures });
+      console.log(
+        `[refine] infra failure (${consecutiveInfraFailures}/${MAX_CONSECUTIVE_INFRA_FAILURES}) — treating as noise, not discard`,
+      );
+      if (consecutiveInfraFailures >= MAX_CONSECUTIVE_INFRA_FAILURES) {
+        console.log(
+          `[refine] ${MAX_CONSECUTIVE_INFRA_FAILURES} consecutive infra failures — exiting early. Not a semantic convergence; retry later.`,
+        );
+        await updateRefineMd(bus, spawner, dir, variants, opts);
+        await clearInflight(dir);
+        return buildResult("INFRA_FAILURE", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
+      }
+      // Skip this iteration entirely — don't record a variant, don't run
+      // gates, don't update discardCounts. It never happened semantically.
+      continue;
+    }
+    // Any non-infra iteration resets the streak.
+    consecutiveInfraFailures = 0;
+
+    // f. Parse verdict
     const verdict = parseVerdict(result.output);
 
     // Emit refine_verdict signal for dashboard tracking
@@ -682,7 +858,7 @@ export async function refine(
       await updateRefineMd(bus, spawner, dir, variants, opts);
 
       await clearInflight(dir);
-      return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+      return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
     }
 
     if (verdict.action === "keep") {
@@ -716,7 +892,7 @@ export async function refine(
             variants = await list(dir);
             await updateRefineMd(bus, spawner, dir, variants, opts);
             await clearInflight(dir);
-            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
           }
           continue;
         }
@@ -772,7 +948,7 @@ export async function refine(
           variants = await list(dir);
           await updateRefineMd(bus, spawner, dir, variants, opts);
           await clearInflight(dir);
-          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
         }
 
         continue;
@@ -831,7 +1007,7 @@ export async function refine(
         variants = await list(dir);
         await updateRefineMd(bus, spawner, dir, variants, opts);
         await clearInflight(dir);
-        return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+        return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
       }
     }
   }
@@ -841,7 +1017,7 @@ export async function refine(
   finalVariantId = getLastKeptId(variants) ?? "000";
   await updateRefineMd(bus, spawner, dir, variants, opts);
   await clearInflight(dir);
-  return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed);
+  return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
 }
 
 /** Emit a status-kind progress signal with refine-loop context. Collapses
@@ -1721,13 +1897,14 @@ function buildSessionLog(variants: Variant[]): string {
 // ── Result builder ─────────────────────────────────────────────
 
 function buildResult(
-  verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED" | "WALL_CLOCK_EXCEEDED",
+  verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED" | "WALL_CLOCK_EXCEEDED" | "INFRA_FAILURE",
   iterations: number,
   totalCostUsd: number,
   variants: Variant[],
   finalVariantId: string,
   gateFailures: number,
   gatesProposed: number,
+  infraFailures = 0,
 ): RefineResult {
   return {
     verdict,
@@ -1738,6 +1915,7 @@ function buildResult(
     finalVariantId,
     gateFailures,
     gatesProposed,
+    ...(infraFailures > 0 ? { infraFailures } : {}),
   };
 }
 

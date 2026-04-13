@@ -1220,6 +1220,10 @@ async function cmdRefine(args: string[]): Promise<void> {
   // touch. Repeatable; one glob per flag. Enforced before gate run /
   // snapshot, so violations force-discard early and cheaply.
   const scope: string[] = [];
+  // --force-stale-baseline: skip the pre-run drift check added for
+  // shakedown Finding #4. Accept that the first discard will rewind
+  // the working tree to the last-kept variant's snapshot.
+  let forceStaleBaseline = false;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
@@ -1253,7 +1257,18 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--approval-hook-timeout" && args[i + 1]) approvalHookTimeout = parseIntArg("--approval-hook-timeout", args[++i], { min: 1 });
     else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
-    else if (args[i] === "--scope" && args[i + 1]) scope.push(args[++i]);
+    else if (args[i] === "--force-stale-baseline") forceStaleBaseline = true;
+    else if (args[i] === "--scope" && args[i + 1]) {
+      // Greedy: consume all following non-flag values as additional globs.
+      // Also supports the repeated-flag form (`--scope A --scope B`). Fixes
+      // shakedown Finding #2: `--scope "src/**" "tests/**"` previously kept
+      // only the first glob, silently dropping the rest and causing false
+      // scope_violations on legitimate iterations.
+      scope.push(args[++i]);
+      while (i + 1 < args.length && !args[i + 1].startsWith("--")) {
+        scope.push(args[++i]);
+      }
+    }
   }
 
   // Load rubric from file if specified
@@ -1361,10 +1376,33 @@ async function cmdRefine(args: string[]): Promise<void> {
   }
   if (interactive) banner(`  Interactive: yes`);
   if (approvalHook) banner(`  Approval hook: ${approvalHook.slice(0, 60)}${approvalHook.length > 60 ? "…" : ""}`);
-  if (gates.length > 0) {
-    banner(`  Gates:      ${gates.length} seeded on baseline`);
+  // Count gates already inherited from the baseline variant (if any) so the
+  // banner reports the actual force, not just what we're about to add.
+  // Fixes shakedown Finding #5 (banner undercount — showed "1 seeded" when
+  // 10 were really in force after 9 were inherited from [021]).
+  let inheritedGateCount = 0;
+  try {
+    const raw = await Deno.readTextFile(`${dir}/.refine/manifest.json`);
+    const manifest = JSON.parse(raw);
+    const baselineVariant = manifest?.variants?.find((v: { id: string }) => v.id === "000");
+    inheritedGateCount = Array.isArray(baselineVariant?.gates) ? baselineVariant.gates.length : 0;
+  } catch {
+    // No manifest yet (fresh repo) — inherited count stays 0.
+  }
+  const totalGateCount = inheritedGateCount + gates.length;
+  if (totalGateCount > 0) {
+    if (inheritedGateCount > 0 && gates.length > 0) {
+      banner(`  Gates:      ${totalGateCount} in force (${inheritedGateCount} inherited + ${gates.length} seeded this run)`);
+    } else if (inheritedGateCount > 0) {
+      banner(`  Gates:      ${inheritedGateCount} inherited from baseline [000]`);
+    } else {
+      banner(`  Gates:      ${gates.length} seeded on baseline`);
+    }
     for (const g of gates) {
       banner(`              • ${g.name}: ${g.command.slice(0, 70)}`);
+    }
+    if (inheritedGateCount > 0) {
+      banner(`              ${DIM}(inherited gates listed via: expo refine . gate list)${RESET}`);
     }
   }
   if (allowAgentGates) banner(`  Agent gates: enabled (agent may propose new gates)`);
@@ -1379,26 +1417,44 @@ async function cmdRefine(args: string[]): Promise<void> {
   const runStartedAt = Date.now();
 
   const { refine } = await import("./refine.ts");
-  const result = await refine(bus, spawner, {
-    dir,
-    rubric,
-    maxIterations,
-    branchFrom,
-    interactive,
-    name,
-    model,
-    agent,
-    timeout,
-    sandbox,
-    gates: gates.length > 0 ? gates : undefined,
-    allowAgentGates,
-    gateTimeout,
-    gatePromoteThreshold,
-    runTimeout,
-    approvalHook,
-    approvalHookTimeout,
-    scope: scope.length > 0 ? scope : undefined,
-  });
+  let result;
+  try {
+    result = await refine(bus, spawner, {
+      dir,
+      rubric,
+      maxIterations,
+      branchFrom,
+      interactive,
+      name,
+      model,
+      agent,
+      timeout,
+      sandbox,
+      gates: gates.length > 0 ? gates : undefined,
+      allowAgentGates,
+      gateTimeout,
+      gatePromoteThreshold,
+      runTimeout,
+      approvalHook,
+      approvalHookTimeout,
+      scope: scope.length > 0 ? scope : undefined,
+      forceStaleBaseline,
+    });
+  } catch (err) {
+    // Clean exit for the stale-baseline refusal — helpful message has
+    // already been printed to stderr by refine(). Fixes shakedown
+    // Finding #4.
+    const msg = (err instanceof Error ? err.message : String(err)) || "";
+    if (msg.includes("stale baseline")) {
+      unguard();
+      await bus.close();
+      if (eventFileHandle) {
+        try { eventFileHandle.close(); } catch { /* already closed */ }
+      }
+      Deno.exit(4);
+    }
+    throw err;
+  }
 
   unguard();
   await bus.close();
@@ -1434,7 +1490,7 @@ async function cmdRefine(args: string[]): Promise<void> {
   console.log(`${BOLD}=== Refine Result ===${RESET}`);
   const verdictColor = result.verdict === "CONVERGED"
     ? GREEN
-    : (result.verdict === "EXHAUSTED" || result.verdict === "WALL_CLOCK_EXCEEDED")
+    : (result.verdict === "EXHAUSTED" || result.verdict === "WALL_CLOCK_EXCEEDED" || result.verdict === "INFRA_FAILURE")
     ? RED
     : YELLOW;
   console.log(`  Verdict:    ${verdictColor}${result.verdict}${RESET}`);
@@ -1443,6 +1499,9 @@ async function cmdRefine(args: string[]): Promise<void> {
   console.log(`  Discarded:  ${result.discardedVariants}`);
   if (result.gateFailures > 0) {
     console.log(`  Gate fails: ${YELLOW}${result.gateFailures}${RESET} (variants forced-discarded by inherited gates)`);
+  }
+  if (result.infraFailures && result.infraFailures > 0) {
+    console.log(`  Infra fails: ${YELLOW}${result.infraFailures}${RESET} (API 5xx / network — not counted as discards)`);
   }
   if (result.gatesProposed > 0) {
     console.log(`  Gates added: ${result.gatesProposed} (agent-proposed)`);

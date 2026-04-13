@@ -2,6 +2,9 @@
 
 Ongoing log. Added-to as findings surface during Shakedown A.
 
+**Update 2026-04-13 evening:** Findings #1–#5 all fixed in the same day.
+See "Fix status" sections appended to each.
+
 ---
 
 ## Finding #0 — Stale installed binary, silent
@@ -430,3 +433,123 @@ adding `rejectFlagAsPositional`).
    on the 7 fail-safe commands (see Finding #1-audit).
 
 After fixes 1 + 2, re-run Shakedown A before moving to Shakedown B.
+
+---
+
+## Fix round (2026-04-13 evening)
+
+All five findings landed as fixes in the same day. Commit `a71452d`
+shipped the Finding #1 fix plus artifacts; this round adds #2-#5 and
+the `cost-per-keep-analytics.md` brief that came out of the retrospective.
+
+### Finding #1 — FIXED (earlier same day, commit `a71452d`)
+
+`rejectFlagAsPositional` helper applied to cmdSpawn, cmdReview,
+cmdRefine. `tests/test-cli-flag-as-positional.ts` (10 checks) locks in
+exit 1 + usage-to-stderr + no stray `./--help/` dir for both `--help`
+and `-h` + happy path still works.
+
+### Finding #2 — FIXED (this commit)
+
+cli.ts `--scope` parser is now greedy. Consumes all following
+non-flag values as additional globs, AND still supports the
+repeated-flag form. Both `--scope "src/**" "tests/**" "docs/**"` and
+`--scope "src/**" --scope "tests/**"` work. Regression:
+`tests/test-shakedown-findings.ts` checks banner reports correct count
+for both forms.
+
+The ROOT-CAUSE analysis in the original write-up above was wrong — I
+assumed a glob-matcher bug. The glob library is fine; the parser
+silently dropped trailing globs. Corrected narrative in the brief.
+
+### Finding #3 — FIXED (this commit)
+
+- New `isInfraFailure(output)` helper in refine.ts detects API 5xx,
+  `api_error`, `overloaded_error`, and network errors (ECONNRESET,
+  ETIMEDOUT, socket hang up, fetch failed).
+- New `INFRA_FAILURE` verdict in `RefineResult.verdict`. Distinct from
+  MAX_ITERATIONS / EXHAUSTED / WALL_CLOCK_EXCEEDED.
+- New `infraFailures` + `consecutiveInfraFailures` counters in the
+  refine loop.
+- Infra failures do NOT count toward consecutive-discard branching.
+- `MAX_CONSECUTIVE_INFRA_FAILURES` = 3 → early exit with
+  `INFRA_FAILURE` verdict instead of spending more budget on a
+  persistent outage.
+- Final banner surfaces `Infra fails: N` when > 0.
+
+10 regression checks in `tests/test-shakedown-findings.ts` cover the
+classifier across real API 5xx shapes and confirm no false positives
+on legitimate verdict prose.
+
+### Finding #4 — FIXED (this commit)
+
+- New `detectSnapshotDrift(dir, variantId)` helper — compares working
+  tree against the `refine/<id>` tag via `git diff --stat`, returns
+  structured summary of changed files + lines.
+- Refine now refuses to start if the working tree has drifted from the
+  last-kept variant's snapshot. Prints a loud, multi-line explanation
+  with three recovery paths (commit/stash, `--force-stale-baseline`,
+  or manual promotion).
+- New CLI flag `--force-stale-baseline` skips the check explicitly.
+- Exits with code 4 (distinct from existing 0/1/2/3) so orchestrators
+  can detect this specific failure mode.
+- 8 regression checks in `tests/test-shakedown-findings.ts` cover the
+  drift detector across no-drift, file-change drift, line-add counts,
+  missing tag, and non-git directory cases.
+
+Smoke-test on this repo:
+```
+$ expo refine . --max 1 --rubric "test"
+⚠ STALE BASELINE — refine refuses to start
+  Last-kept variant:  [021] (tag refine/021)
+  Drift:              48 file(s), +8271/-331 lines
+  ...
+```
+Before this fix, that run would have SILENTLY rewound 48 files of
+v0.2.2-v0.2.9 work on its first discard. Sev-1 door closed.
+
+### Finding #5 — FIXED (this commit)
+
+Banner now reads the baseline's gate count from the manifest before
+printing. Output now correctly shows e.g. "Gates: 10 inherited from
+baseline [000]" instead of "Gates: 1 seeded on baseline" when 9 gates
+were already inherited. Three display modes handle the permutations:
+- inherited-only: "N inherited from baseline [000]"
+- seeded-only: "N seeded on baseline"
+- both: "N in force (A inherited + B seeded this run)"
+
+### Related: new brief `.brief/cost-per-keep-analytics.md`
+
+Came out of the retrospective question "how do you figure out what
+the top of the asymptotic s-curve looks like?" Cost-per-keep is the
+framing. Design sketch covers the metric, why it matters, computation,
+where to surface it (final summary, mid-run `[metrics]` signal,
+REFINE.md session log, declarative `--stop-at-cost-per-keep` exit
+flag), and why it's **meaningless without gates** (illustrated via the
+"pathological gambling run" on a markdown knowledge garden). First-ship
+scope is ~60 LOC; deferred to a separate session.
+
+---
+
+## Shakedown A status after fix round
+
+All five findings either fixed or explicitly deferred. The question
+now is whether a RE-RUN of Shakedown A would surface new bugs or be
+clean. Outstanding risks:
+
+- The working tree drift on this repo means the re-run MUST start with
+  either a commit-all step OR the `--force-stale-baseline` flag. If
+  forced, it re-creates the same cleanup-on-discard dynamics.
+- Finding #2's fix changes shakedown semantics: `--scope "src/**"
+  "tests/**"` now really scopes to BOTH directories, so iter-3's
+  legitimate keep (workflow.ts + test file) would survive this time.
+  That could unblock real keep-quality progress.
+- Finding #3's fix means an API 500 storm no longer wastes 5 iterations
+  — it exits cleanly after 3 consecutive. A re-run during a flaky
+  period would exit early with INFRA_FAILURE instead of MAX_ITERATIONS.
+- Finding #4's fix now hard-stops before wasting any money on a stale
+  baseline, so a naive user can't silently burn the wrong tree.
+
+Recommended: commit current working-tree drift as a snapshot variant
+("re-baseline"), then re-run. OR shift to Shakedown B tier-1
+(`snapshot`) since the same class of fixes applies universally.
