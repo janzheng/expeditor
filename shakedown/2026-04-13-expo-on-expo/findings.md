@@ -553,3 +553,244 @@ clean. Outstanding risks:
 Recommended: commit current working-tree drift as a snapshot variant
 ("re-baseline"), then re-run. OR shift to Shakedown B tier-1
 (`snapshot`) since the same class of fixes applies universally.
+
+---
+
+# Round 2 (post-fix re-run, 2026-04-13 afternoon)
+
+Fired with `--force-stale-baseline` since all work from the morning
+fixes was committed to main at `1e41888` (not at risk). Same rubric,
+same scope, same caps.
+
+## Round-2 statistics
+
+- Verdict: **CONVERGED** (not MAX_ITERATIONS — agent itself declared done)
+- Iterations: 9
+- Session keeps: 0 (all rubric- or gate-discarded)
+- Session discards: 8 (7 rubric, 1 budget)
+- Gate fails: 1 (real typecheck failure, NOT the buggy scope violation)
+- Infra failures: 0
+- Cost: $8.64 (vs round 1's $8.84 — nearly identical, very different outcomes)
+- Duration: 1409s (23 min)
+
+## Round-2 findings
+
+All 5 pre-round-2 findings are fixed and working. Direct confirmation:
+- **#2 fix (--scope parser)** — iter-2 touched both `src/**` AND `tests/**`
+  files and was scope-validated correctly. Previously would have
+  false-positive discarded on the test file.
+- **#3 fix (infra classifier)** — zero API errors this run, but the
+  classifier is in place for next time.
+- **#4 fix (stale-baseline detection)** — drift check fired before
+  run, `--force-stale-baseline` bypassed it as designed.
+- **#5 fix (banner gate count)** — banner correctly showed "11 in
+  force (10 inherited + 1 seeded this run)".
+
+## Finding #6 — session-delta vs lifetime in final banner
+
+**Severity:** low (UX).
+
+Final banner reads:
+```
+Kept:       17
+Discarded:  24
+```
+
+These are LIFETIME counts across all sessions' variants. On round 2,
+that "17" includes variants 001-021 (prior sessions) plus the
+single "no change" convergence marker (variant 040). Session keeps
+were effectively **zero**. A user reading the banner thinks the
+session produced 17 keeps.
+
+### Fix direction
+
+Add `sessionKept` + `sessionDiscarded` to `RefineResult` (computed as
+delta between pre-run and post-run variant counts). Change banner to:
+```
+Kept:       1 this session (17 lifetime)
+Discarded:  8 this session (24 lifetime)
+```
+
+When session == lifetime (fresh run, first time ever), collapse to
+the single-number form for brevity.
+
+## Finding #7 — SEVERITY-1: project-git snapshot backend commits to HEAD of main
+
+**Severity:** 1. Upstream of Finding #4 and strictly worse.
+**Where:** `/Users/janzheng/Desktop/Projects/_deno/apps/snapshot/src/snapshot.ts:199-202`
+
+### Evidence
+
+During round 2's final iteration (variant 040, "no change" convergence
+keep), the snapshot backend ran:
+```typescript
+await run(
+  ["git", "commit", "--allow-empty", "-m", `${TAG_PREFIX}${id}`],
+  { cwd: dir },  // ← commits to whatever branch is currently checked out
+);
+```
+
+`cwd: dir` means the project directory — whose current branch was
+`main`. So the commit `refine/040` landed on `main` as a regular
+commit, advancing HEAD.
+
+Result: `main` became `1e41888 → 8f2bb47` (refine/040). The new HEAD's
+code was variant 040's snapshot state, which anchored to **variant
+021's pre-v0.2.2 code** — i.e. all v0.2.2 through v0.2.9 fixes were
+wiped from `src/refine.ts` (2859 → 1205 lines), `src/cli.ts`, the
+TASKS files, etc.
+
+Recovery was simple because origin still had `1e41888`: `git reset
+--hard 1e41888`. But:
+- If `git push` had happened, recovery requires `--force-with-lease`
+  and coordinating with anyone who pulled.
+- Every KEPT variant advances HEAD. A 20-iteration run with 6 keeps
+  produces 6 commits to main. Even clean runs leave commit noise.
+- Uncommitted work between runs would be wiped by `git add -A` before
+  each commit (already addressed for scope, but the `add -A` fallback
+  is still there for the un-scoped case).
+
+### Comparison to Finding #4
+
+Finding #4 (stale-baseline rewind) was about the WORKING TREE being
+silently rewound. Reversible via `git checkout HEAD -- .`.
+
+Finding #7 is about BRANCH HEAD being silently advanced. Requires
+reflog surgery or `--force-with-lease` to undo.
+
+Both trigger from the same event (snapshot operations during a refine
+run). My #4 fix catches the START condition but not the PER-KEEP
+behavior during the run. #7 is the actual destructive mechanism.
+
+### Fix direction
+
+The hidden-git backend (`.refine/work/.git` with its own HEAD) is
+already correctly implemented; the project-git path is the broken one.
+Options:
+
+1. **Detach HEAD for snapshot commits.** Before each commit, switch
+   to detached HEAD at the current commit; commit; tag; switch back
+   to the original branch without fast-forwarding. The tag preserves
+   the commit's contents for restore; main branch HEAD stays put.
+   This is the minimum-invasive fix — users' main branch never moves.
+2. **Dedicated refine-only ref.** Maintain a `refs/refine/head` ref
+   that advances with each kept variant. The main branch is never
+   touched. Tags (`refine/NNN`) still point into this chain.
+3. **Always use hidden-git backend for refine.** Expose a flag to
+   force `.refine/work/` isolation even in a project-git repo.
+   Skips the "commits modify your tree" problem entirely. Downside:
+   the agent works in a separate worktree, so terminal UX and IDE
+   integration require explicit copy paths.
+4. **Refuse project-git backend by default; require `--inline`.**
+   Defensive default. Combined with the hidden-git backend, makes the
+   destructive path opt-in.
+
+Option 1 is surgical; Option 3 is the safest ergonomically but
+relocates where the user's code lives during a run. I'd ship Option
+1 as the urgent fix and Option 3 as the long-term recommended
+default.
+
+### Severity rationale
+
+This is arguably the single worst finding in the entire shakedown.
+Unlike #4 (reversible local state), #7 produces real git history
+changes that propagate on `git push`. A user following the QUICKSTART
+"kick it off Friday, review Monday" flow could come back to 30+
+snapshot commits on main branch, with no way to distinguish real
+intent from automated snapshot noise without reading each commit.
+
+The only reason it's not currently causing broader damage is that
+we caught it before pushing. If round 2 had pushed automatically
+(via a hook, CI, or a `git push` in the rubric), every downstream
+consumer of expeditor would have pulled a corrupted main.
+
+**Do not run `expo refine` on any project-git-backed repo until #7
+is fixed**, unless you're on a throwaway branch you're prepared to
+reset.
+
+### Shakedown B implications
+
+This blocks a clean Shakedown B on `snapshot` (or any tier-1/2
+candidate). Workarounds for tier-1 run:
+- Run on a disposable branch (`git checkout -b shakedown-refine-A` in
+  the target repo first).
+- Plan to `git reset --hard` back after review, regardless of outcome.
+
+---
+
+## Addendum: the s-curve shape of round 2
+
+The shakedown brief asked "how do you tell when you're at the top of
+the asymptotic s-curve." Round 2 produced a concrete answer worth
+documenting.
+
+### The shape of a healthy "top of the curve" run
+
+Iter-by-iter of round 2:
+1. `parseFloatArg` helper — rubric says no. Discard.
+2. Error message improvement — legitimate, but typecheck failure on real code. Gate-discard.
+3. Budget-exceeded on pre-existing test failure debug. Cost-guard kill.
+4. Budget-flag NaN validation — discard as over-engineering.
+5-8. Agent itself declares "no rubric-aligned opportunities. Declining to propose slop."
+9. `converged — no change`.
+
+The diagnostic pattern:
+- Real attempts (1, 2, 4) each get a different objection — rubric,
+  gate, rubric. No single-failure-mode repetition.
+- Real failures (3) are bounded by existing guards.
+- Self-recognition (5-8) — the agent itself says "nothing to find"
+  based on its own recent-failures memory.
+- Convergence (9) is the agent's OWN signal, not a system cap.
+
+That last point is the subtle one: **ending in CONVERGED is
+qualitatively different from ending in MAX_ITERATIONS**. MAX_ITERATIONS
+means "ran out of trying." CONVERGED means "the loop itself agreed
+we're done." If the agent's rubric is sound and its gates are real,
+CONVERGED is the s-curve top.
+
+### Why round-1's ending was LESS informative
+
+Round 1 ended in MAX_ITERATIONS. That's consistent with three
+different realities:
+- Loop is broken (what actually happened — infra + parser + glob bugs).
+- Rubric is wrong (we'd need to change it to know).
+- Loop is correct but genuinely still has findings (one more session
+  would help).
+
+We couldn't tell which. Round 2's CONVERGED narrows it — we now know
+the loop works AND the current rubric is at-or-near the top.
+
+### Cost-per-keep signal from round 2
+
+- Session cost-per-keep: **∞** (0 keeps / $8.64).
+- Lifetime cost-per-keep on expo: $TBD / 16 real keeps ≈ some finite number.
+
+The infinite session cost-per-keep is NOT a bug — it's a valid signal
+meaning "this session produced no keeps." Combined with the
+CONVERGED verdict, it means "and that's the correct answer."
+
+Compare to round 1's session cost-per-keep (also ∞, but for the wrong
+reason: the loop never got a chance to keep anything because of bugs).
+
+This is exactly the "metric needs to be read alongside other metrics"
+point from `.brief/cost-per-keep-analytics.md`. Infinite cost-per-keep
++ CONVERGED = meaningful s-curve top. Infinite cost-per-keep +
+MAX_ITERATIONS + high gate-fail or infra-failure rate = broken loop
+noise.
+
+### Practical implication: what it takes to make expo-on-expo productive again
+
+You can't extract more keeps by running more iterations with the
+same rubric. You'd need to either:
+1. **Change the rubric axis.** "Performance hot paths" or "ergonomic
+   flag consistency" instead of error-message clarity.
+2. **Change the scope.** Widen beyond `src/**` `tests/**` or narrow
+   to a single file you know has issues.
+3. **Change the gate set.** Add a "no TODO comments" gate, a "no
+   file exceeds 500 lines" gate, a perf benchmark gate.
+
+Each of these effectively reshapes the s-curve. The agent's
+"nothing to find" message IS relative to the rubric + gates + scope
+triad — not an absolute statement about the codebase.
+
+---

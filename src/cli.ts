@@ -1495,8 +1495,15 @@ async function cmdRefine(args: string[]): Promise<void> {
     : YELLOW;
   console.log(`  Verdict:    ${verdictColor}${result.verdict}${RESET}`);
   console.log(`  Iterations: ${result.iterations}`);
-  console.log(`  Kept:       ${result.keptVariants}`);
-  console.log(`  Discarded:  ${result.discardedVariants}`);
+  // Show session-delta so a run with many lifetime keeps but zero session
+  // keeps doesn't misleadingly advertise "Kept: 17" (shakedown Finding #6).
+  if (result.sessionKept !== result.keptVariants || result.sessionDiscarded !== result.discardedVariants) {
+    console.log(`  Kept:       ${result.sessionKept} this session ${DIM}(${result.keptVariants} lifetime)${RESET}`);
+    console.log(`  Discarded:  ${result.sessionDiscarded} this session ${DIM}(${result.discardedVariants} lifetime)${RESET}`);
+  } else {
+    console.log(`  Kept:       ${result.keptVariants}`);
+    console.log(`  Discarded:  ${result.discardedVariants}`);
+  }
   if (result.gateFailures > 0) {
     console.log(`  Gate fails: ${YELLOW}${result.gateFailures}${RESET} (variants forced-discarded by inherited gates)`);
   }

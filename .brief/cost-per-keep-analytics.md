@@ -322,3 +322,114 @@ File this as a rainy-day shakedown experiment. If ever run, capture
 per-iteration event-file + every kept variant's REFINE.md update so
 the "why this metric lies without gates" story can be told with
 real numbers rather than hypothetical ones.
+
+---
+
+## Update (2026-04-13 afternoon): s-curve shape proven in practice
+
+Shakedown A round 2 gave us the first real example of an s-curve top
+on a healthy loop. Worth documenting concretely since this is the
+specific pattern the "cost per keep" framing is supposed to detect.
+
+### The canonical healthy-top signature
+
+Expo-on-expo, 9 iterations, same rubric + scope + gates as round 1,
+all post-fix:
+
+- Iterations 1, 2, 4 each proposed a real change
+  - Each hit a DIFFERENT objection (rubric, real typecheck gate, rubric)
+  - No single-failure-mode repetition
+- Iteration 3 hit per-agent budget debugging a pre-existing failure
+  - Budget guard bounded the damage
+- Iterations 5-8: agent explicitly declared "no rubric-aligned
+  opportunities. Declining to propose slop."
+  - The agent's own recent-failures memory (`recentFailures` ring)
+    was citing "4 consecutive discards this session" in its reasoning
+- Iteration 9: `refine_verdict: converged — no change`
+
+**Verdict: CONVERGED.** Session cost-per-keep: ∞. $8.64 burned.
+
+### Why this is meaningful
+
+The combination of:
+1. `CONVERGED` verdict (not MAX_ITERATIONS), AND
+2. `∞` session cost-per-keep (0 keeps), AND
+3. Mix of rubric / gate / budget objections (not a single failure mode)
+
+...is the **healthy s-curve top**. Each component alone is ambiguous:
+
+- `CONVERGED` alone could mean a single well-gated keep then early exit.
+- `∞` cost-per-keep alone could mean a broken loop (see round 1).
+- Mixed objections alone could mean a run that lost budget to noise.
+
+Together, they mean: *the loop worked, the agent tried, and it
+correctly identified there's nothing left to find on this rubric.*
+
+### The diagnostic algorithm
+
+Given a finished run, to classify it:
+
+```
+if verdict == "INFRA_FAILURE":
+    → infrastructure problem; retry later
+elif verdict == "CONVERGED" and sessionKept > 0:
+    → productive run; keeps are the output
+elif verdict == "CONVERGED" and sessionKept == 0:
+    → s-curve top for current rubric (this post's shape)
+elif verdict in ("MAX_ITERATIONS", "EXHAUSTED") and infraFailures > 0:
+    → loop-polluted-by-infra; re-run with better network
+elif verdict in ("MAX_ITERATIONS", "EXHAUSTED") and scopeViolations > 0:
+    → scope/rubric mismatch; investigate which
+elif verdict in ("MAX_ITERATIONS", "EXHAUSTED") and sessionKept == 0:
+    → rubric probably too tight OR codebase converged; try wider rubric
+elif verdict in ("MAX_ITERATIONS", "EXHAUSTED") and sessionKept > 0:
+    → probably still productive; just ran out of iteration cap
+```
+
+This algorithm is the first draft of what the "final summary" banner
+could print as a one-line diagnosis alongside the numbers. Worth
+implementing alongside cost-per-keep as a shipping unit.
+
+### What changes after the s-curve top
+
+When a run returns the canonical healthy-top signature, three
+practical next steps:
+
+1. **Accept the top for this rubric.** The work for THIS rubric is
+   done. Don't run more iterations with the same inputs.
+
+2. **Change the rubric axis.** Error-message clarity was round 2's
+   axis; performance, security, or ergonomic-consistency are
+   independent axes. A fresh rubric on the same codebase is a fresh
+   s-curve — it restarts the "descend from easy wins to hard wins"
+   shape.
+
+3. **Change the gate set.** Add a gate that encodes a new invariant
+   (e.g. "no file exceeds 500 lines", "all CLI flags have help text",
+   "no TODO comments outside tests"). New gates create new
+   force-discard patterns and effectively reshape what "keep" means.
+
+Each of those is a separate session. The cost-per-keep metric lets
+you COMPARE them — "axis A cost $1.20/keep, axis B cost $4.30/keep,
+therefore axis A had more juice available for this codebase."
+
+### What we now know about expo-on-expo specifically
+
+- **Session 1 (variants 000-021):** 16 real keeps, substantial
+  summaries. Early s-curve — easy wins.
+- **Session 2 (round 1, variants 022-031):** undetermined — bug-polluted.
+- **Session 3 (round 2, variants 032-040):** CONVERGED with 0 keeps.
+  Top of s-curve for the current rubric.
+
+To get more out of expo-on-expo, we'd need a rubric shift. The
+obvious next axes:
+- **Orchestrator ergonomics:** consistency of flag naming, exit
+  codes, --json schemas across subcommands. Hold-over from Finding
+  #1's audit.
+- **Resource hygiene:** worktree cleanup, .refine/ dir size, gate
+  timeout defaults. Quiet infrastructure quality.
+- **Safety defaults:** e.g. --total-budget defaulting to something
+  conservative instead of requiring opt-in. Post-Finding-#7 a
+  "defensive defaults" rubric would be very productive.
+
+Each of those is its own shakedown-worth of experiment.

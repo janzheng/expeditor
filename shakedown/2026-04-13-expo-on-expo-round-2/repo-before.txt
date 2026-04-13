@@ -1,0 +1,18 @@
+=== git log -5 (at shakedown fire time) ===
+1e41888 Fix Shakedown A Findings #2, #3, #4, #5 + cost-per-keep brief
+a71452d Fix: --help consumed as positional arg on spawn/review/refine
+cd31662 Shakedown brief: add Shakedown A (expo-on-expo unattended) before B
+3694602 .brief/other-repo-shakedown.md — planning brief for shakedown session
+5292706 Docs: QUICKSTART.md + midrun-steering design sketch
+
+=== manifest head before round 2 ===
+021
+
+=== variants before round 2 ===
+32 (session 2 added variants 022-031, all discarded)
+
+=== drift vs refine/021 at fire time ===
+49 files changed, 8892 insertions(+), 331 deletions(-)
+
+=== installed binary at fire time ===
+/Users/janzheng/.deno/bin/expo — rebuilt from 1e41888

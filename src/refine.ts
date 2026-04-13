@@ -119,8 +119,17 @@ export interface RefineResult {
   verdict: "CONVERGED" | "MAX_ITERATIONS" | "EXHAUSTED" | "WALL_CLOCK_EXCEEDED" | "INFRA_FAILURE";
   iterations: number;
   totalCostUsd: number;
+  /** Lifetime kept-variant count (includes baseline + all prior sessions). */
   keptVariants: number;
+  /** Lifetime discarded-variant count (includes all prior sessions). */
   discardedVariants: number;
+  /** Keeps that landed during THIS refine() call specifically. Fixes
+   *  shakedown Finding #6 — previously the banner mixed session with
+   *  lifetime and was misleading on repeat runs ("Kept: 17" on a
+   *  zero-productive session). */
+  sessionKept: number;
+  /** Discards during this refine() call. */
+  sessionDiscarded: number;
   finalVariantId: string;
   /** Count of times an inherited gate forced a discard. */
   gateFailures: number;
@@ -555,6 +564,12 @@ export async function refine(
     variants = await list(dir);
   }
 
+  // Record pre-run variant counts so we can report session-delta in the
+  // final result. Fixes shakedown Finding #6 (banner showed lifetime
+  // "Kept: 17" on a session that kept only 1 variant — misleading).
+  const preRunKept = variants.filter((v) => v.status === "kept" || v.status === "baseline").length;
+  const preRunDiscarded = variants.filter((v) => v.status === "discarded").length;
+
   // 2b. Seed baseline gates from opts.gates, if provided and not already present.
   //     These inherit to every descendant — perfect for project-wide invariants
   //     like `deno test` or a type-check command.
@@ -708,7 +723,7 @@ To proceed, pick one:
       finalVariantId = getLastKeptId(variants) ?? "000";
       await updateRefineMd(bus, spawner, dir, variants, opts);
       await clearInflight(dir);
-      return buildResult("WALL_CLOCK_EXCEEDED", iterations - 1, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
+      return buildResult("WALL_CLOCK_EXCEEDED", iterations - 1, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
     }
 
     // Refresh variant list
@@ -798,7 +813,7 @@ To proceed, pick one:
         );
         await updateRefineMd(bus, spawner, dir, variants, opts);
         await clearInflight(dir);
-        return buildResult("INFRA_FAILURE", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
+        return buildResult("INFRA_FAILURE", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
       }
       // Skip this iteration entirely — don't record a variant, don't run
       // gates, don't update discardCounts. It never happened semantically.
@@ -858,7 +873,7 @@ To proceed, pick one:
       await updateRefineMd(bus, spawner, dir, variants, opts);
 
       await clearInflight(dir);
-      return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
+      return buildResult("CONVERGED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
     }
 
     if (verdict.action === "keep") {
@@ -892,7 +907,7 @@ To proceed, pick one:
             variants = await list(dir);
             await updateRefineMd(bus, spawner, dir, variants, opts);
             await clearInflight(dir);
-            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
+            return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
           }
           continue;
         }
@@ -948,7 +963,7 @@ To proceed, pick one:
           variants = await list(dir);
           await updateRefineMd(bus, spawner, dir, variants, opts);
           await clearInflight(dir);
-          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
+          return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
         }
 
         continue;
@@ -1007,7 +1022,7 @@ To proceed, pick one:
         variants = await list(dir);
         await updateRefineMd(bus, spawner, dir, variants, opts);
         await clearInflight(dir);
-        return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
+        return buildResult("EXHAUSTED", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
       }
     }
   }
@@ -1017,7 +1032,7 @@ To proceed, pick one:
   finalVariantId = getLastKeptId(variants) ?? "000";
   await updateRefineMd(bus, spawner, dir, variants, opts);
   await clearInflight(dir);
-  return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures);
+  return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded);
 }
 
 /** Emit a status-kind progress signal with refine-loop context. Collapses
@@ -1905,13 +1920,19 @@ function buildResult(
   gateFailures: number,
   gatesProposed: number,
   infraFailures = 0,
+  preRunKept = 0,
+  preRunDiscarded = 0,
 ): RefineResult {
+  const keptVariants = variants.filter((v) => v.status === "kept" || v.status === "baseline").length;
+  const discardedVariants = variants.filter((v) => v.status === "discarded").length;
   return {
     verdict,
     iterations,
     totalCostUsd,
-    keptVariants: variants.filter((v) => v.status === "kept" || v.status === "baseline").length,
-    discardedVariants: variants.filter((v) => v.status === "discarded").length,
+    keptVariants,
+    discardedVariants,
+    sessionKept: Math.max(0, keptVariants - preRunKept),
+    sessionDiscarded: Math.max(0, discardedVariants - preRunDiscarded),
     finalVariantId,
     gateFailures,
     gatesProposed,
