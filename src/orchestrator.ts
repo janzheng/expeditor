@@ -733,6 +733,11 @@ export function costGuard(
       console.warn(
         `[cost-guard] Total $${total.toFixed(4)} exceeds budget $${opts.totalBudget} — killing all running agents`,
       );
+      // Drain any in-flight bus rotation first so the kill-wave's failure
+      // signals + agents' own stdout/stderr flushes don't pile up against
+      // a blocked log handle. Best-effort with a short deadline — better to
+      // proceed with the kill than stall if drain is slow.
+      await bus.drainPending(250).catch(() => false);
       let killedCount = 0;
       if (opts.spawner) {
         killedCount = await opts.spawner.killAllRunning(

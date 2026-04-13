@@ -1345,6 +1345,182 @@ export async function removeRefineGate(
   }
 }
 
+// ── Zero-config discovery (--auto) ─────────────────────────────
+
+/** A defaults-bundle that `expo refine <dir> --auto` can apply in lieu of
+ *  hand-passed `--rubric` / `--gate` flags. Surfaces what was detected so
+ *  the CLI can tell the user and an orchestrating agent can verify before
+ *  firing the loop. */
+export interface AutoDiscovery {
+  /** Short label: "deno" | "node" | "python" | "rust" | "go" | "make" | "unknown" */
+  projectType: string;
+  /** Gates to auto-seed on the baseline variant. Usually just one "tests" gate. */
+  gates: Array<{ name: string; command: string; rationale?: string }>;
+  /** A minimal, safe default rubric. The user can override with --rubric. */
+  rubric: string;
+  /** Per-file reasons for the picks — shown in the CLI summary so nothing
+   *  is surprising. */
+  reasons: string[];
+}
+
+/**
+ * Inspect `dir` for common project-type markers and return sensible refine
+ * defaults. Never throws — if nothing is detected, returns {projectType:
+ * "unknown"} with an empty gates list and a generic rubric so `--auto` still
+ * works on bare directories.
+ *
+ * Detection order (first match wins for the project type, but ALL matching
+ * test commands get seeded as gates so polyglot repos are covered):
+ *   1. deno.json with a `test` task
+ *   2. package.json with a `test` script (skipped if it's the npm default
+ *      "echo \"Error: no test specified\" && exit 1")
+ *   3. pyproject.toml (pytest is the de-facto default)
+ *   4. Cargo.toml → `cargo test`
+ *   5. go.mod → `go test ./...`
+ *   6. Makefile with a `test:` target → `make test`
+ */
+export async function discoverAutoDefaults(dir: string): Promise<AutoDiscovery> {
+  const gates: AutoDiscovery["gates"] = [];
+  const reasons: string[] = [];
+  let primaryType = "unknown";
+
+  // deno.json
+  try {
+    const raw = await Deno.readTextFile(`${dir}/deno.json`);
+    try {
+      const parsed = JSON.parse(raw);
+      const tasks = parsed?.tasks as Record<string, string> | undefined;
+      if (tasks && typeof tasks.test === "string" && tasks.test.trim()) {
+        gates.push({
+          name: "deno_test",
+          command: "deno task test",
+          rationale: "auto-detected from deno.json tasks.test",
+        });
+        reasons.push(`deno.json has tasks.test → seeded "deno_test" gate`);
+        if (primaryType === "unknown") primaryType = "deno";
+      } else {
+        // Even without a test task, `deno check` on the project root is a
+        // cheap invariant — broken TS stops being committed.
+        gates.push({
+          name: "deno_check",
+          command: "deno check **/*.ts",
+          rationale: "auto-detected from deno.json (no tasks.test — using deno check)",
+        });
+        reasons.push(`deno.json found but no tasks.test → seeded "deno_check"`);
+        if (primaryType === "unknown") primaryType = "deno";
+      }
+    } catch {
+      reasons.push(`deno.json present but unparseable — skipping`);
+    }
+  } catch { /* no deno.json */ }
+
+  // package.json
+  try {
+    const raw = await Deno.readTextFile(`${dir}/package.json`);
+    try {
+      const parsed = JSON.parse(raw);
+      const scripts = parsed?.scripts as Record<string, string> | undefined;
+      const testScript = scripts?.test;
+      const isNpmDefault = testScript &&
+        /no test specified/i.test(testScript);
+      if (testScript && !isNpmDefault) {
+        gates.push({
+          name: "npm_test",
+          command: "npm test",
+          rationale: "auto-detected from package.json scripts.test",
+        });
+        reasons.push(`package.json has scripts.test → seeded "npm_test" gate`);
+        if (primaryType === "unknown") primaryType = "node";
+      } else if (isNpmDefault) {
+        reasons.push(`package.json scripts.test is npm's placeholder — skipping`);
+      }
+    } catch {
+      reasons.push(`package.json present but unparseable — skipping`);
+    }
+  } catch { /* no package.json */ }
+
+  // pyproject.toml — we don't parse TOML, presence is enough to assume pytest
+  try {
+    await Deno.stat(`${dir}/pyproject.toml`);
+    gates.push({
+      name: "pytest",
+      command: "pytest -x",
+      rationale: "auto-detected from pyproject.toml (pytest is the de-facto default)",
+    });
+    reasons.push(`pyproject.toml found → seeded "pytest" gate (fail-fast with -x)`);
+    if (primaryType === "unknown") primaryType = "python";
+  } catch { /* no pyproject */ }
+
+  // Cargo.toml
+  try {
+    await Deno.stat(`${dir}/Cargo.toml`);
+    gates.push({
+      name: "cargo_test",
+      command: "cargo test --quiet",
+      rationale: "auto-detected from Cargo.toml",
+    });
+    reasons.push(`Cargo.toml found → seeded "cargo_test" gate`);
+    if (primaryType === "unknown") primaryType = "rust";
+  } catch { /* no Cargo.toml */ }
+
+  // go.mod
+  try {
+    await Deno.stat(`${dir}/go.mod`);
+    gates.push({
+      name: "go_test",
+      command: "go test ./...",
+      rationale: "auto-detected from go.mod",
+    });
+    reasons.push(`go.mod found → seeded "go_test" gate`);
+    if (primaryType === "unknown") primaryType = "go";
+  } catch { /* no go.mod */ }
+
+  // Makefile with a test target — last-resort catch-all for polyglot repos
+  // that use make as their task runner.
+  if (gates.length === 0) {
+    try {
+      const raw = await Deno.readTextFile(`${dir}/Makefile`);
+      if (/^test\s*:/m.test(raw)) {
+        gates.push({
+          name: "make_test",
+          command: "make test",
+          rationale: "auto-detected Makefile with `test:` target",
+        });
+        reasons.push(`Makefile has test target → seeded "make_test" gate`);
+        if (primaryType === "unknown") primaryType = "make";
+      }
+    } catch { /* no Makefile */ }
+  }
+
+  if (gates.length === 0) {
+    reasons.push(
+      `no test infrastructure detected — no gates seeded (pass --gate "name=cmd" to add one)`,
+    );
+  }
+
+  // Default rubric — deliberately generic. The real value-add of --auto is
+  // the test gates, not the rubric. Users who care about rubric specifics
+  // will pass --rubric; this just gives `--auto` something non-empty so the
+  // loop has a direction to push on.
+  const rubric = [
+    "Improve this project incrementally. Each iteration should make ONE focused improvement:",
+    "- readability of the most-edited files",
+    "- clearer error messages or logging where behavior is user-visible",
+    "- removing dead / unused code with care",
+    "- tightening type signatures where TypeScript or similar helps",
+    "",
+    "Do NOT:",
+    "- change public APIs or CLI flags without strong cause",
+    "- rewrite big subsystems",
+    "- add new dependencies",
+    "",
+    "All auto-detected test gates must continue to pass. If the tests reveal a",
+    "latent bug during your change, fixing that IS a valid iteration.",
+  ].join("\n");
+
+  return { projectType: primaryType, gates, rubric, reasons };
+}
+
 /**
  * Parsed sections from a REFINE.md file. Sections are detected by `## Heading`
  * markers — typical headings are "Heuristics", "Next Session", and per-session

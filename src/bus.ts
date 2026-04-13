@@ -78,6 +78,36 @@ export class SignalBus {
   }
 
   /**
+   * Observability: how many signals are currently queued waiting for an
+   * in-progress rotation to finish. Used by cost-guard's `drainPending()`
+   * to decide when the kill-wave can safely proceed without losing signals.
+   */
+  get pendingWriteCount(): number {
+    return this.pendingWrites.length;
+  }
+
+  /**
+   * Wait for the rotation queue to drain OR for the deadline to elapse.
+   *
+   * Used before a kill-wave (cost-guard total-budget overrun) so the
+   * failure signals from dying agents have a chance to flush to disk
+   * before their pipes close. Best-effort: if the rotation takes longer
+   * than `timeoutMs`, we proceed anyway — losing a couple tail signals
+   * is preferable to stalling the kill cascade.
+   *
+   * Returns true when the queue drained cleanly, false on timeout.
+   */
+  async drainPending(timeoutMs = 250): Promise<boolean> {
+    const start = Date.now();
+    while (this.pendingWrites.length > 0 || this.rotating) {
+      if (Date.now() - start >= timeoutMs) return false;
+      // Short poll — pendingWrites drain as part of rotate()'s finally block.
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return true;
+  }
+
+  /**
    * Subscribe to bus persistence status changes. Called on every online→offline
    * and offline→online transition so dashboards/orchestrators can react instead
    * of silently running half-blind.

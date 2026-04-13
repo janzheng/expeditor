@@ -38,12 +38,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 ## Discovery / zero-config
 
-- [ ] `expo refine <dir> --auto` — zero-config discovery mode #agentic-ux #discover
-  - [*] Inspired by evo's `/discover` command. See `github-repos/evo/notes.md`
-  - [*] Reads `deno.json` / `package.json` / `pyproject.toml` for test commands
-  - [*] Seeds default gates from existing test infrastructure (`deno task test`, `npm test`, `pytest -x`)
-  - [*] Generates a default rubric from repo signals (README, recent commits, TODO comments)
-  - [*] Reduces setup from 6 flags to 0 when the tool has sensible defaults
+- [x] [shipped 2026-04-13: `expo refine <dir> --auto` + `discoverAutoDefaults(dir)` exported. Detects deno.json (tasks.test or `deno check` fallback), package.json (npm test; skips placeholder), pyproject.toml (pytest -x), Cargo.toml (cargo test --quiet), go.mod (go test ./...), Makefile (make test — only when no other markers found). Polyglot repos seed all matching gates. Explicit --rubric and --gate flags still win. Discovery reasons printed to stderr so nothing is invisible. Rubric is generic/conservative — the real --auto value-add is the gates. 33 tests in tests/test-refine-auto-discovery.ts. README / git-log heuristics for rubric tuning deferred.] `expo refine <dir> --auto` — zero-config discovery mode #agentic-ux #discover
 
 - [ ] Agent-in-loop approval (non-TTY) #agentic-ux
   - [*] `--interactive` reads stdin — assumes a human at terminal
@@ -64,14 +59,9 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
   - [*] Two possible fixes: (a) after discard, clear non-scope-essential working-tree files too; (b) track "what was legitimately created this iteration" more precisely via timestamps or file-watcher rather than dirty-set difference.
   - [*] Benign as-is — straggler is easy to spot and commit separately. But worth logging so it doesn't surprise anyone.
 
-- [ ] Stagger process kills in costGuard.killAllRunning #safety #bus
-  - [*] Total-budget overrun triggers killAllRunning which loops sending SIGTERM to every running agent's process group in a tight for-loop. In a fan-out scenario this signals dozens of processes at once — they all die in unison, pipe flushes, bus contention, brief CPU spike.
-  - [*] User noticed a 100% CPU spike during session 3 when this fired
-  - [*] Fix: small delay between kills, OR Promise.all with concurrency cap. Not a correctness bug — just a politeness one.
+- [x] [shipped 2026-04-13: `killAllRunning(reason, {staggerMs})` spaces SIGTERMs with DEFAULT_KILL_STAGGER_MS=25 between agents; fan-outs no longer all die in the same microsecond. Opt-out via staggerMs=0. 15 tests in tests/test-kill-wave-polish.ts.] Stagger process kills in costGuard.killAllRunning #safety #bus
 
-- [ ] Drain bus pending writes before costGuard kills agents #bus #safety
-  - [*] When kill-wave hits, dying agents flush stdout/stderr through pipes expo holds open, while the cost-guard is also trying to emit its `budget_exceeded` signal. If bus is rotating when this happens, pendingWrites can stack up quickly.
-  - [*] Pairs with the stagger fix above. Both are about making the kill path less lumpy.
+- [x] [shipped 2026-04-13: `SignalBus.drainPending(timeoutMs=250)` + `bus.pendingWriteCount` getter. costGuard calls drainPending before killAllRunning so in-flight log rotation has a chance to complete and pending signals flush before the kill-wave adds more. Best-effort — proceeds with the kill if drain doesn't finish in time, losing tail signals is better than stalling. Pairs with stagger fix.] Drain bus pending writes before costGuard kills agents #bus #safety
 
 ## Notes and connections
 

@@ -79,6 +79,14 @@ export function assertValidAllowedDomains(domains: readonly string[]): void {
   }
 }
 
+/** Delay (ms) between SIGTERMs when killAllRunning walks a fan-out.
+ *  Small enough not to meaningfully delay the kill cascade; large enough
+ *  to let each child's pipe-flush + exit proceed without contention with
+ *  the next kill. Observed during session 3 self-playtest: simultaneous
+ *  kills on ~20 agents produced a brief 100% CPU spike. A few ms between
+ *  kills smooths that out. Exported for tests that want to override. */
+export const DEFAULT_KILL_STAGGER_MS = 25;
+
 export const SANDBOX_PRESETS: Record<string, SandboxConfig> = {
   /**
    * Auto-approve everything. The "stop asking me" mode.
@@ -220,12 +228,23 @@ export class AgentSpawner {
   /** Kill every agent currently marked as `running`. Used by cost-guard on
    *  total-budget overrun — there's no way to tell which agent's cost put
    *  us over, and in fan-out patterns (race, workflow) all siblings share
-   *  the budget. Safer to stop everything than let the overrun compound. */
-  async killAllRunning(reason?: string): Promise<number> {
+   *  the budget. Safer to stop everything than let the overrun compound.
+   *
+   *  `staggerMs` spaces out the SIGTERMs so a fan-out of 20+ agents doesn't
+   *  all die in the same microsecond — which previously caused pipe-flush
+   *  contention and a 100% CPU spike observed during self-playtest session
+   *  3. Default is a small delay; 0 preserves the old all-at-once behaviour
+   *  for callers (or tests) that want it. */
+  async killAllRunning(reason?: string, opts?: { staggerMs?: number }): Promise<number> {
     const running = this.registry.getByStatus("running");
+    const staggerMs = opts?.staggerMs ?? DEFAULT_KILL_STAGGER_MS;
     let killed = 0;
-    for (const entry of running) {
-      if (await this.killAgent(entry.agentId, reason)) killed++;
+    for (let i = 0; i < running.length; i++) {
+      if (await this.killAgent(running[i].agentId, reason)) killed++;
+      // Space between kills — except after the last one, nothing to wait for.
+      if (staggerMs > 0 && i < running.length - 1) {
+        await new Promise((r) => setTimeout(r, staggerMs));
+      }
     }
     return killed;
   }

@@ -1136,7 +1136,7 @@ async function cmdRefine(args: string[]): Promise<void> {
 
   if (!dir) {
     console.error("Usage: expo refine <dir> [--rubric \"...\"] [--rubric-file RUBRIC.md] [--max N] [--branch-from <id>] [--interactive] [--agent TYPE] [--timeout N] [--run-timeout N]");
-    console.error("                       [--gate \"name=command\"] [--allow-agent-gates] [--gate-timeout N] [--json] [--event-file PATH]");
+    console.error("                       [--gate \"name=command\"] [--allow-agent-gates] [--gate-timeout N] [--json] [--event-file PATH] [--auto]");
     console.error("                       [--per-agent-budget USD] [--total-budget USD] [--scope GLOB]");
     console.error("");
     console.error("Quick commands:");
@@ -1171,6 +1171,10 @@ async function cmdRefine(args: string[]): Promise<void> {
   // --event-file: write one JSONL line per bus signal to a file so external
   // consumers (dashboards, CI, downstream agents) can tail live progress.
   let eventFile: string | undefined;
+  // --auto: run discoverAutoDefaults(dir) to seed gates + rubric from repo
+  // signals (deno.json / package.json / pyproject.toml / Cargo.toml / etc).
+  // Explicit flags still win — --rubric / --gate override the defaults.
+  let autoMode = false;
   // Budget guards — previously hard-coded at $2/agent and $20 total.
   // Expose as flags so long unattended sessions don't require editing source.
   let perAgentBudget = 2.0;
@@ -1205,6 +1209,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--run-timeout" && args[i + 1]) runTimeout = parseIntArg("--run-timeout", args[++i], { min: 1 });
     else if (args[i] === "--json") jsonOutput = true;
     else if (args[i] === "--event-file" && args[i + 1]) eventFile = args[++i];
+    else if (args[i] === "--auto") autoMode = true;
     else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
     else if (args[i] === "--scope" && args[i + 1]) scope.push(args[++i]);
@@ -1218,6 +1223,21 @@ async function cmdRefine(args: string[]): Promise<void> {
       console.error(`${RED}Cannot read rubric file: ${rubricFile}${RESET}`);
       Deno.exit(1);
     }
+  }
+
+  // --auto: fill in missing rubric / gates from detected project signals.
+  // Explicit flags always win; --auto only fills the holes.
+  if (autoMode) {
+    const { discoverAutoDefaults } = await import("./refine.ts");
+    const discovery = await discoverAutoDefaults(dir);
+    if (!rubric) rubric = discovery.rubric;
+    if (gates.length === 0) gates.push(...discovery.gates);
+    // Surface the discovery so nothing is invisible — useful for both the
+    // human reading the terminal and an orchestrator parsing stderr.
+    const autoLog = jsonOutput ? console.error : console.log;
+    autoLog(`${BOLD}Auto-discovery (${discovery.projectType}):${RESET}`);
+    for (const r of discovery.reasons) autoLog(`  ${DIM}• ${r}${RESET}`);
+    autoLog("");
   }
 
   const logFile = `${LOGS_DIR}/bus-refine-${Date.now()}.jsonl`;
