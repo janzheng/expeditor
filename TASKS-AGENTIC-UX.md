@@ -8,11 +8,7 @@ Pairs with TASKS-AUDIT.md (speed + security findings from the automated audit) �
 
 - [x] [shipped 2026-04-13: `--json` on `expo refine <dir>` emits ONE JSON object on stdout: {verdict, iterations, kept, discarded, gateFailures, gatesProposed, finalVariantId, costUsd, durationMs, logFile, eventFile}. Signal prints go to stderr; banner suppressed. Exit 0 on CONVERGED / 1 otherwise. `--event-file PATH` also shipped — writes one JSONL line per bus signal for live consumption. perIteration array deferred: not tracked currently, the event-file covers the same need by being a superset.] Structured JSON output for refine results #agentic-ux #output
 
-- [ ] Token-efficient formats for CLI output (TOON-style) #agentic-ux #output #toon
-  - [*] `gate list`, `--tree`, `--status` render pretty text tables
-  - [*] Add `--format=compact|toon|json` flag across these verbs
-  - [*] Directly inspired by AXI principle 1 (token-efficient output). See `github-repos/axi/notes.md`
-  - [*] Not strictly required right now — measure actual context usage first
+- [x] [shipped 2026-04-13: `--format json` (or `--json`) on all three read-verbs. gate list JSON: {totalGates, totalVariants, byVariant[]} for whole-archive, {variantId, gates[{source, addedBy}]} per-variant. --tree JSON: {variants[{id, status, parent, change, summary, timestamp, gates}]}. --status JSON: {dir, totalVariants, kept, discarded, current{id,change,summary,timestamp}|null, diskSize, refineMdExists}. 29 unit tests covering populated/empty archive, per-variant inherited-source tracking. TOON-proper deferred pending measurement — "one JSON object on stdout" covers the actual use case (orchestrators parsing programmatically) without a new format spec to maintain.] Token-efficient formats for CLI output (TOON-style) #agentic-ux #output #toon
 
 - [x] [shipped 2026-04-13: `expo refine <dir> heuristics [--json]` prints REFINE.md + parsed `## Heading` sections. loadRefineHeuristics() exported from refine.ts so orchestrators can import directly. Missing file returns {exists:false} — no throw. Text form shows section names + line counts, raw content, and a pointer when file is missing. 28 tests in tests/test-refine-feedback.ts.] Expose REFINE.md heuristics to orchestrating agents #agentic-ux
 

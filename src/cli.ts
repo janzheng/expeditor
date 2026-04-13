@@ -1109,14 +1109,19 @@ async function cmdRefine(args: string[]): Promise<void> {
   const dir = args[0];
 
   // Handle --tree and --status as quick exits (no dir required, defaults to .)
+  // `--format json` or `--json` switches to machine-readable output so
+  // orchestrators can parse without regex on human-formatted text.
+  const formatIdx = args.indexOf("--format");
+  const readVerbJson = args.includes("--json") ||
+    (formatIdx >= 0 && args[formatIdx + 1] === "json");
   if (args.includes("--tree")) {
     const { showRefineTree } = await import("./refine.ts");
-    await showRefineTree(dir || ".");
+    await showRefineTree(dir || ".", { json: readVerbJson });
     return;
   }
   if (args.includes("--status")) {
     const { showRefineStatus } = await import("./refine.ts");
-    await showRefineStatus(dir || ".");
+    await showRefineStatus(dir || ".", { json: readVerbJson });
     return;
   }
 
@@ -1460,9 +1465,15 @@ async function cmdRefineGate(args: string[]): Promise<void> {
   }
 
   if (sub === "list") {
-    const variantId = args[3];
+    // Positional after "list" may be variant_id or a flag — treat anything
+    // starting with "--" as a flag so `gate list --json` still works.
+    const maybeVariant = args[3];
+    const variantId = maybeVariant && !maybeVariant.startsWith("--") ? maybeVariant : undefined;
+    const fmtIdx = args.indexOf("--format");
+    const json = args.includes("--json") ||
+      (fmtIdx >= 0 && args[fmtIdx + 1] === "json");
     const { showRefineGates } = await import("./refine.ts");
-    await showRefineGates(dir, variantId);
+    await showRefineGates(dir, variantId, { json });
     return;
   }
 

@@ -1551,10 +1551,26 @@ function buildResult(
 
 // ── Public helpers for CLI ─────────────────────────────────────
 
-/** Print the archive tree for --tree flag */
-export async function showRefineTree(dir: string): Promise<void> {
+/** Print the archive tree for --tree flag. `--format json` emits a machine-
+ *  readable variant list so orchestrators can parse without regex. */
+export async function showRefineTree(dir: string, opts?: { json?: boolean }): Promise<void> {
   try {
     await init(dir);
+    if (opts?.json) {
+      const variants = await list(dir);
+      console.log(JSON.stringify({
+        variants: variants.map((v) => ({
+          id: v.id,
+          status: v.status,
+          parent: v.parent ?? null,
+          change: v.change ?? "",
+          summary: v.summary ?? "",
+          timestamp: v.timestamp,
+          gates: (v.gates ?? []).map((g) => ({ name: g.name, command: g.command, addedBy: g.addedBy })),
+        })),
+      }));
+      return;
+    }
     const treeStr = await tree(dir);
     console.log(treeStr);
   } catch (err) {
@@ -1562,20 +1578,59 @@ export async function showRefineTree(dir: string): Promise<void> {
   }
 }
 
-/** Print the archive status for --status flag */
-export async function showRefineStatus(dir: string): Promise<void> {
+/** Print the archive status for --status flag. `--format json` emits a
+ *  structured summary so orchestrators can gate on it programmatically
+ *  (e.g. "only start a new run if no kept variants from today"). */
+export async function showRefineStatus(dir: string, opts?: { json?: boolean }): Promise<void> {
   try {
     await init(dir);
     const variants = await list(dir);
+
+    const keptCount = variants.filter((v) => v.status === "kept" || v.status === "baseline").length;
+    const discardedCount = variants.filter((v) => v.status === "discarded").length;
+    const lastKept = variants.filter((v) => v.status !== "discarded").at(-1);
+
+    // Disk usage — best-effort; may be missing on stripped systems.
+    let diskSize: string | null = null;
+    try {
+      const cmd = new Deno.Command("du", { args: ["-sh", `${dir}/.refine`], stdout: "piped", stderr: "piped" });
+      const out = await cmd.output();
+      if (out.success) {
+        diskSize = new TextDecoder().decode(out.stdout).split("\t")[0]?.trim() ?? null;
+      }
+    } catch { /* du not available */ }
+
+    // REFINE.md presence
+    let refineMdExists = false;
+    try {
+      await Deno.stat(`${dir}/${REFINE_MD}`);
+      refineMdExists = true;
+    } catch { /* not created yet */ }
+
+    if (opts?.json) {
+      console.log(JSON.stringify({
+        dir,
+        totalVariants: variants.length,
+        kept: keptCount,
+        discarded: discardedCount,
+        current: lastKept
+          ? {
+            id: lastKept.id,
+            change: lastKept.change ?? "",
+            summary: lastKept.summary ?? "",
+            timestamp: lastKept.timestamp,
+          }
+          : null,
+        diskSize,
+        refineMdExists,
+      }));
+      return;
+    }
 
     if (variants.length === 0) {
       console.log("No refinement sessions found.");
       return;
     }
-
-    const keptCount = variants.filter((v) => v.status === "kept" || v.status === "baseline").length;
-    const discardedCount = variants.filter((v) => v.status === "discarded").length;
-    const lastKept = variants.filter((v) => v.status !== "discarded").at(-1);
 
     console.log(`Refinement archive for: ${dir}`);
     console.log(`  Variants: ${variants.length} total (${keptCount} kept, ${discardedCount} discarded)`);
@@ -1594,23 +1649,8 @@ export async function showRefineStatus(dir: string): Promise<void> {
       console.log(`    [${v.id}] ${status} ${desc.slice(0, 60)}`);
     }
 
-    // Show .refine/ disk usage
-    try {
-      const cmd = new Deno.Command("du", { args: ["-sh", `${dir}/.refine`], stdout: "piped", stderr: "piped" });
-      const out = await cmd.output();
-      if (out.success) {
-        const size = new TextDecoder().decode(out.stdout).split("\t")[0]?.trim() ?? "?";
-        console.log(`\n  Disk:      ${size} (.refine/)`);
-      }
-    } catch { /* du not available */ }
-
-    // Show REFINE.md existence
-    try {
-      await Deno.stat(`${dir}/${REFINE_MD}`);
-      console.log(`  REFINE.md: exists`);
-    } catch {
-      console.log(`  REFINE.md: not yet created`);
-    }
+    if (diskSize) console.log(`\n  Disk:      ${diskSize} (.refine/)`);
+    console.log(`  REFINE.md: ${refineMdExists ? "exists" : "not yet created"}`);
   } catch (err) {
     console.error(`[refine] Failed to show status: ${String(err).slice(0, 200)}`);
   }
@@ -1620,11 +1660,63 @@ export async function showRefineStatus(dir: string): Promise<void> {
 
 /** Print every gate in the archive, showing where each is directly attached
  *  and which variants inherit it. When variantId is given, only show gates
- *  that variant sees (direct + inherited). */
-export async function showRefineGates(dir: string, variantId?: string): Promise<void> {
+ *  that variant sees (direct + inherited). `--format json` emits machine-
+ *  readable output so orchestrators can filter/inspect programmatically. */
+export async function showRefineGates(
+  dir: string,
+  variantId?: string,
+  opts?: { json?: boolean },
+): Promise<void> {
   try {
     await init(dir);
     const variants = await list(dir);
+
+    if (opts?.json) {
+      if (variantId) {
+        const target = variants.find((v) => v.id === variantId);
+        if (!target) {
+          console.log(JSON.stringify({ ok: false, error: `Variant ${variantId} not found` }));
+          Deno.exit(1);
+        }
+        const direct = await listGates(dir, variantId);
+        const inherited = await collectGates(dir, variantId);
+        const directNames = new Set(direct.map((g) => g.name));
+        console.log(JSON.stringify({
+          variantId,
+          gates: inherited.map((g) => ({
+            name: g.name,
+            command: g.command,
+            rationale: g.rationale ?? null,
+            addedBy: g.addedBy,
+            source: directNames.has(g.name) ? "direct" : "inherited",
+          })),
+        }));
+        return;
+      }
+      // No variantId — emit the whole archive's gate map
+      const byVariant: Array<{ variantId: string; status: string; gates: Array<{ name: string; command: string; rationale: string | null }> }> = [];
+      let total = 0;
+      for (const v of variants) {
+        const gates = v.gates ?? [];
+        if (gates.length === 0) continue;
+        total += gates.length;
+        byVariant.push({
+          variantId: v.id,
+          status: v.status,
+          gates: gates.map((g) => ({
+            name: g.name,
+            command: g.command,
+            rationale: g.rationale ?? null,
+          })),
+        });
+      }
+      console.log(JSON.stringify({
+        totalGates: total,
+        totalVariants: variants.length,
+        byVariant,
+      }));
+      return;
+    }
 
     if (variants.length === 0) {
       console.log("No refinement sessions found.");
