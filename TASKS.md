@@ -26,6 +26,115 @@ Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DES
 
 All actionable work complete. 3 P3 items remain in design/question phase.
 
+## Design-cycle framing follow-ups #next-session
+
+Surfaced during the 2026-04-13 wrap-up. The insight: expo's toolkit
+already supports diverge → converge → diverge → converge design
+cycles, but the commands are presented as a flat list rather than as
+phases of a cycle. Two low-risk moves capture the reframe without
+committing to new code. See
+[`.brief/design-cycle-orchestration.md`](.brief/design-cycle-orchestration.md)
+for the full framing.
+
+### Task A: Workflow template for a single design cycle #template
+
+**Goal:** let a user run one full design cycle (audit → rubric →
+refine → review) TODAY using `expo workflow` + existing primitives,
+without waiting for an `expo cycle` command to exist.
+
+- [ ] Create `workflows/design-cycle.workflow.md` — a markdown
+  workflow file that expresses one full design cycle:
+  - Stage 1 (diverge): spawn `expo audit` agent, output to
+    `.brief/cycle-<timestamp>-findings.md`. Agent prompt asks for
+    ranked findings grouped by axis (validation, error clarity,
+    test coverage, etc.).
+  - Stage 2 (converge): synthesis agent reads the audit findings,
+    picks 2–3 axes, writes one rubric per axis to
+    `.brief/cycle-<timestamp>-rubric-{A,B,C}.md`.
+  - Stage 3 (note, not automation): "Now run `expo refine . --rubric-file
+    .brief/cycle-<timestamp>-rubric-A.md --scope ...` per rubric.
+    Review kept variants, then re-run this workflow for cycle 2."
+  - Keep stage 3 as a manual step on the first template — we learn
+    from it what automating the handoff would need.
+- [ ] Validate the template by running it once on a small repo
+  (could be snapshot again, or a new toy repo). Verify the audit
+  output is readable, synthesis produces usable rubrics, and the
+  handoff to refine is natural.
+- [ ] Document the pattern in `workflows/README.md` with a 5-line
+  "here's the cycle, here's how to run it" recipe.
+
+**Effort:** ~45 min for the template + 1 validation run.
+**Cost:** ~$5-10 for the validation run.
+**Risk:** low. We're using existing primitives. Failure mode is
+"the template needs iteration" — fine, that's the point.
+
+**Why now (template) vs later (`expo cycle` command):** we've run
+the manual cycle pattern exactly once (today). Templates let us run
+it 2-3 more times cheaply and observe where the real friction is,
+so that when we DO build the command, we know what shape it should
+take. See design-cycle-orchestration.md § "The discipline move:
+templates before commands."
+
+### Task B: Restructure README around the four phases #docs
+
+**Goal:** recast the "when to reach for which command" section from
+a flat list into a phase-oriented taxonomy. Same commands, same
+features — different narrative. Makes the toolkit's story coherent
+to a new reader.
+
+- [ ] Edit README.md's "When to reach for which command" section
+  (currently around line 150-170ish). Replace the flat list:
+  ```
+  expo refine <dir>       Iterative improvement against a rubric
+  expo mxit <TASKS.md>    Work through a checklist
+  expo race "A" vs "B"    Two approaches, judge picks winner
+  expo workflow <file>    Multi-stage DAG
+  expo review <prompt>    Work agent + review agent ping-pong
+  expo spawn <prompt>     One-shot
+  ```
+  With the phase-oriented grouping:
+  ```
+  Diverge (explore):
+    expo audit            One-shot exploration, ranked findings to markdown
+    expo race "A" vs "B"  Parallel framings, judge picks winner
+
+  Converge (select + build):
+    expo refine <dir>     Bounded iteration against a rubric + gates
+    expo review <prompt>  Work agent + review agent ping-pong
+
+  Progress through known work:
+    expo mxit <TASKS.md>  Checklist execution
+    expo workflow <file>  Staged DAGs (also: cycle engine if you design the stages)
+
+  Glue:
+    expo spawn <prompt>   Single-task spawn
+    expo serve            Dashboard
+  ```
+- [ ] Add a single-sentence callout: "See `.brief/design-cycle-orchestration.md`
+  for the diverge→converge→diverge→converge framing that
+  motivates this taxonomy."
+- [ ] Preserve ALL existing content (install, quick start, examples,
+  features sections) — this is purely a reorganization of the
+  "when to reach for" block.
+
+**Effort:** ~20-30 min.
+**Cost:** $0 (no agent runs).
+**Risk:** zero. Pure documentation change.
+
+**Why this is the high-leverage move:** the reframe has already
+been captured in the briefs. The README is where most new users
+first form a mental model of expo. Updating it to match the reframe
+costs nothing and pays off every time someone reads it.
+
+### Sequencing
+
+Do Task B first (20-30 min, zero cost, immediate payoff). Then
+Task A (~45 min + $5-10) to make the cycle pattern usable. If both
+feel good after a couple cycles of real use, Task C (optional,
+later): build `expo cycle <topic>` as glue. See
+design-cycle-orchestration.md § "Sketch — a first-class `cycle`
+command" for the shape.
+
 ## Shakedown A+B (2026-04-13) — findings + fix log #shakedown
 
 Day-long expo-on-expo (Shakedown A rounds 1-2) + tier-1 on `snapshot`
