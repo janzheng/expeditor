@@ -32,6 +32,12 @@ import {
   writeHeartbeat,
 } from "@snapshot/core";
 import type { Gate, Variant } from "@snapshot/core";
+import {
+  inboxPathForIteration,
+  mcpConfigPathForIteration,
+  readVerdictInbox,
+  writeRefineMcpConfig,
+} from "./verdict-inbox.ts";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -149,6 +155,38 @@ export interface RefineOptions {
    *  CLI surface: `--force-stale-heartbeat`. Distinct exit code 6
    *  so CI can branch on heartbeat conflicts separately. */
   forceStaleHeartbeat?: boolean;
+
+  /** Route the agent's verdict through an MCP tool instead of relying on
+   *  the agent emitting a `<verdict>` fenced block in its prose. Closes
+   *  the agent-harness contract gap (Finding #17): agents skip the fenced
+   *  wrapper 40-80% of iters on Claude CLI, forcing the multi-layer parser
+   *  to recover the work via inferred-prose / defaulted-keep /
+   *  extraction-retry. The retry alone costs ~$0.10-$0.15 per iter.
+   *
+   *  When set, refine spawns a companion MCP stdio server
+   *  (`refine-mcp-server.ts`) per iteration and adds it to the agent's
+   *  MCP config. The agent calls `mcp__expo_refine__submit_verdict` with
+   *  its structured verdict; the server writes it to a per-iter inbox
+   *  file, which refine reads as parse Layer 0.
+   *
+   *  The four legacy parser layers remain as fallback — an agent that
+   *  skips the tool still has every existing recovery path.
+   *
+   *  Only works with the `claude` adapter. codex/opencode/pi/generic
+   *  ignore `--mcp-config` silently. CLI prints a warning when set with
+   *  a non-Claude `--agent`. */
+  verdictMcp?: boolean;
+
+  /** Path to an existing MCP config file whose `mcpServers` should be
+   *  merged into the per-iter config refine generates when
+   *  `verdictMcp` is on. The main use is the auto-approve permission
+   *  server: when `--auto-approve` and `--verdict-mcp` are both on,
+   *  both servers need to coexist in the one config file that
+   *  `--mcp-config` accepts.
+   *
+   *  The refine-mcp server wins on name collision (`expo_refine`) but
+   *  name collisions shouldn't happen in practice. */
+  baseMcpConfigPath?: string;
 }
 
 export interface RefineResult {
@@ -216,7 +254,8 @@ interface GateProposal {
  *  by preference — "fenced" is ideal, later entries are progressively
  *  less trustworthy. */
 type ParseMethod =
-  | "fenced" // Layer 1: <verdict>{...}</verdict> block, ideal path
+  | "mcp-tool" // Layer 0: agent called mcp__expo_refine__submit_verdict — structural, highest confidence
+  | "fenced" // Layer 1: <verdict>{...}</verdict> block, ideal prose path
   | "legacy-line" // Layer 2: VERDICT: KEEP / CHANGE: / SUMMARY: lines
   | "inferred-prose" // Layer 3: natural-language patterns in the agent's prose
   | "defaulted-keep" // Layer 4: no verdict emitted, but gates pass + changes made
@@ -925,7 +964,39 @@ To proceed, pick one:
       inheritedGates,
       allowAgentGates: opts.allowAgentGates ?? false,
       recentFailures: recentFailures.length > 0 ? [...recentFailures] : undefined,
+      verdictMcp: opts.verdictMcp ?? false,
     });
+
+    // a.5. When verdictMcp is on, generate a per-iteration MCP config so
+    //      the spawned agent has access to the `submit_verdict` tool. The
+    //      config is merged with any existing base config (e.g. the auto-
+    //      approve permission server) so both coexist under a single
+    //      --mcp-config file — Claude only accepts one.
+    //
+    //      Per-iteration paths (see verdict-inbox.ts) give us clean
+    //      isolation: iter N's inbox can never leak into iter N+1's read.
+    let iterMcpConfigPath: string | undefined;
+    let iterInboxPath: string | undefined;
+    if (opts.verdictMcp) {
+      iterInboxPath = inboxPathForIteration(dir, iterations);
+      const configPath = mcpConfigPathForIteration(dir, iterations);
+      try {
+        iterMcpConfigPath = await writeRefineMcpConfig(
+          configPath,
+          iterInboxPath,
+          opts.baseMcpConfigPath,
+        );
+      } catch (err) {
+        // Failing to write the MCP config shouldn't kill the run — the
+        // fallback parser layers still work. Log and proceed without
+        // verdictMcp for this iteration.
+        console.warn(
+          `[refine] iter ${iterations}: could not write MCP config: ${err instanceof Error ? err.message : String(err)} — falling back to prose-only verdict`,
+        );
+        iterMcpConfigPath = undefined;
+        iterInboxPath = undefined;
+      }
+    }
 
     // b. Snapshot of working-tree "dirty" paths BEFORE agent spawn.
     //    Used after the agent returns to compute which paths the agent
@@ -950,6 +1021,16 @@ To proceed, pick one:
       cwd: dir,
       timeout: iterTimeout,
       sandbox: opts.sandbox,
+      // iterMcpConfigPath is set only when opts.verdictMcp is on AND the
+      // config file wrote successfully. Overrides any spawner-default
+      // mcpConfig because our per-iter file already merged in the base
+      // (e.g. auto-approve) config in writeRefineMcpConfig.
+      ...(iterMcpConfigPath ? { mcpConfig: iterMcpConfigPath } : {}),
+      // Pre-allow the submit_verdict MCP tool. Without this, Claude prompts
+      // for permission on first invocation and the agent falls back to the
+      // prose <verdict> block — defeating the whole point of --verdict-mcp.
+      // Claude's --allowedTools adds to the allow set (doesn't restrict).
+      ...(iterMcpConfigPath ? { allowedTools: ["mcp__expo_refine__submit_verdict"] } : {}),
     });
     totalCost += result.cost;
 
@@ -992,17 +1073,38 @@ To proceed, pick one:
     consecutiveInfraFailures = 0;
 
     // f. Parse verdict — multi-layer stack (Finding #15 + #17):
-    //    Layer 1: fenced <verdict>{...}</verdict>                 (ideal, inside parseVerdict)
-    //    Layer 2: legacy VERDICT: KEEP lines                      (inside parseVerdict)
-    //    Layer 3: natural-language prose inference                (inside parseVerdict)
-    //    Layer 4: default-keep-if-safe (gates will verify)        (below)
-    //    Layer 5: spawn a verdict-extraction retry agent          (below, last resort)
+    //    Layer 0: MCP submit_verdict tool call (highest confidence)   (below, only when verdictMcp on)
+    //    Layer 1: fenced <verdict>{...}</verdict>                     (ideal prose path, inside parseVerdict)
+    //    Layer 2: legacy VERDICT: KEEP lines                          (inside parseVerdict)
+    //    Layer 3: natural-language prose inference                    (inside parseVerdict)
+    //    Layer 4: default-keep-if-safe (gates will verify)            (below)
+    //    Layer 5: spawn a verdict-extraction retry agent              (below, last resort)
     //
     // Silent-destroy of legitimate work is the bug class we're defending
     // against. Agents skip the structured wrapper in 40-80% of iters on
     // Claude Code CLI despite explicit instructions; the multi-layer stack
     // preserves work without trusting the agent to follow the contract.
-    let verdict = parseVerdict(result.output);
+    //
+    // Layer 0 closes the contract gap at the source: the agent calls a
+    // structured MCP tool, which can't be parsed wrong. Layers 1-5 remain
+    // as fallback for agents that skip the tool anyway.
+    let verdict: ParsedVerdict | undefined;
+    if (iterInboxPath) {
+      const inboxVerdict = await readVerdictInbox(iterInboxPath);
+      if (inboxVerdict) {
+        verdict = {
+          action: inboxVerdict.action,
+          change: inboxVerdict.change,
+          summary: inboxVerdict.summary,
+          gateProposals: inboxVerdict.gateProposals,
+          parseMethod: "mcp-tool",
+        };
+        console.log(
+          `[refine] iter ${iterations}: verdict via MCP tool: ${verdict.action} [Layer 0]`,
+        );
+      }
+    }
+    if (!verdict) verdict = parseVerdict(result.output);
 
     if (verdict.parseFailed) {
       // Layer 4: default-keep-if-safe. If the agent made tracked changes
@@ -1632,6 +1734,11 @@ export interface PromptContext {
   /** Recently-failed attempts the agent should NOT repeat. Empty on iter 1.
    *  Fed from recentGateFailures in the refine loop. */
   recentFailures?: RecentFailure[];
+  /** True when the refine-mcp verdict tool is wired up for this iteration.
+   *  Flips the prompt's verdict section to prefer the MCP tool path over
+   *  the fenced block. The fenced block is still documented as a fallback
+   *  — never remove it, so prior-contract agents still work. */
+  verdictMcp?: boolean;
 }
 
 /** Gate-failure memo from a prior iteration, injected into the next prompt
@@ -1707,11 +1814,36 @@ export function buildRefinePrompt(ctx: PromptContext): string {
   parts.push("");
   parts.push("1. Examine the current state of the project");
   parts.push("2. Make ONE focused improvement based on the rubric");
-  parts.push("3. End your response with the verdict block described below");
+  if (ctx.verdictMcp) {
+    parts.push("3. Submit your verdict by calling the `mcp__expo_refine__submit_verdict` tool (see below)");
+  } else {
+    parts.push("3. End your response with the verdict block described below");
+  }
   parts.push("");
-  parts.push("## Verdict — REQUIRED");
-  parts.push("");
-  parts.push("Your response MUST end with a `<verdict>...</verdict>` block. If you omit it, or if prose follows `</verdict>`, your iteration will be force-discarded regardless of the quality of your code changes. Do NOT narrate your verdict in prose instead of emitting the block.");
+
+  if (ctx.verdictMcp) {
+    parts.push("## Verdict — REQUIRED (call the MCP tool)");
+    parts.push("");
+    parts.push("You have access to a tool named `mcp__expo_refine__submit_verdict`. **Call this tool ONCE when you are done.** It is the primary, highest-confidence way to report your outcome — the refine loop reads your verdict directly from the tool call.");
+    parts.push("");
+    parts.push("Tool arguments:");
+    parts.push("- `action`: one of `\"keep\"`, `\"discard\"`, or `\"converged\"` (see Action semantics below)");
+    parts.push("- `change`: one-line description of what you changed this iteration");
+    parts.push("- `summary`: fuller explanation of what you did and why");
+    if (ctx.allowAgentGates) {
+      parts.push("- `gate_proposals` (optional): array of `{name, command, rationale?}` entries — see 'Optional: proposing a gate' below");
+    }
+    parts.push("");
+    parts.push("The tool will write your verdict to the loop's inbox and return `{ok: true, action, written_to}`. If validation fails (missing fields, invalid action), the tool returns `{ok: false, error: ...}` — read the error and retry the call with corrected arguments.");
+    parts.push("");
+    parts.push("## Verdict — FALLBACK (prose block)");
+    parts.push("");
+    parts.push("If the MCP tool is unavailable for any reason, you MAY fall back to ending your response with a `<verdict>...</verdict>` block. The loop's parser accepts this as a secondary path. Prefer the tool when it is available.");
+  } else {
+    parts.push("## Verdict — REQUIRED");
+    parts.push("");
+    parts.push("Your response MUST end with a `<verdict>...</verdict>` block. If you omit it, or if prose follows `</verdict>`, your iteration will be force-discarded regardless of the quality of your code changes. Do NOT narrate your verdict in prose instead of emitting the block.");
+  }
   parts.push("");
   parts.push("```");
   parts.push("<verdict>");

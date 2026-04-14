@@ -1248,6 +1248,13 @@ async function cmdRefine(args: string[]): Promise<void> {
   // hasn't aged past the 30s staleness threshold yet. Distinct exit
   // code 6 lets CI branch on heartbeat conflicts specifically.
   let forceStaleHeartbeat = false;
+  // --verdict-mcp: route the agent's verdict through an MCP tool call
+  // instead of the prose `<verdict>` block. Closes the agent-harness
+  // contract gap (Finding #17) — agents skip the fenced block 40-80% of
+  // iters on Claude CLI. Only works with the claude adapter; other
+  // adapters ignore --mcp-config and the loop silently falls back to
+  // prose-layer parsing. We warn when combined with a non-claude agent.
+  let verdictMcp = false;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
@@ -1284,6 +1291,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--force-stale-baseline") forceStaleBaseline = true;
     else if (args[i] === "--skip-baseline-check") skipBaselineCheck = true;
     else if (args[i] === "--force-stale-heartbeat") forceStaleHeartbeat = true;
+    else if (args[i] === "--verdict-mcp") verdictMcp = true;
     else if (args[i] === "--scope" && args[i + 1]) {
       // Greedy: consume all following non-flag values as additional globs.
       // Also supports the repeated-flag form (`--scope A --scope B`). Fixes
@@ -1432,6 +1440,15 @@ async function cmdRefine(args: string[]): Promise<void> {
     }
   }
   if (allowAgentGates) banner(`  Agent gates: enabled (agent may propose new gates)`);
+  if (verdictMcp) {
+    if (agent === "claude") {
+      banner(`  Verdict:    MCP tool (mcp__expo_refine__submit_verdict, Layer 0) + prose fallback`);
+    } else {
+      banner(
+        `  ${YELLOW}Verdict:    --verdict-mcp set but --agent=${agent} doesn't support MCP config; ignoring (prose-only parsing)${RESET}`,
+      );
+    }
+  }
   if (scope.length > 0) {
     banner(`  Scope:      ${scope.length} glob(s) — agent may only modify these paths`);
     for (const g of scope) banner(`              • ${g}`);
@@ -1467,6 +1484,7 @@ async function cmdRefine(args: string[]): Promise<void> {
       forceStaleBaseline,
       skipBaselineCheck,
       forceStaleHeartbeat,
+      verdictMcp,
     });
   } catch (err) {
     // Clean exits for the three pre-flight refusals — helpful messages
@@ -2012,6 +2030,18 @@ function maybeAttachWebhook(bus: import("./bus.ts").SignalBus): void {
 // --- Main ---
 
 const [command, ...args] = Deno.args;
+
+// Hidden subcommand: dispatch to the refine-loop MCP server. This is how
+// the `expo refine --verdict-mcp` flow reaches the server when running as
+// a compiled binary — `import.meta.url` inside the binary's virtual FS
+// isn't a real path the MCP spawn can find, so the MCP config invokes
+// `${expo} __refine-mcp-server` instead. See verdict-inbox.ts. Not for
+// human use; no help text.
+if (command === "__refine-mcp-server") {
+  const { runRefineMcpServer } = await import("./refine-mcp-server.ts");
+  await runRefineMcpServer();
+  Deno.exit(0);
+}
 
 switch (command) {
   case "init":

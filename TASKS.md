@@ -76,17 +76,23 @@ so do it first.
   **Blocked by:** Finding #13 (pre-flight gates) — otherwise
   baseline-gate-broken repos would foul the measurement.
 
-- [ ] **Finding #17 MCP tool-use spike** (architecture BRIEF)
-  `-> .brief/finding-17-mcp-tool-use.md` (to write)
-  The four-layer parser mitigates the harness-contract gap but
-  doesn't close it at the source. The proper fix is tool-use /
-  structured-output: expose a `submit_verdict` tool the agent MUST
-  call. Expo currently spawns via CLI adapters (claude / codex /
-  opencode / pi / generic) which have different tool-use support.
-  Spike: investigate what each adapter can offer (MCP server?
-  direct Anthropic SDK? plain stdin/stdout JSON schema?) and
-  recommend a shape that works across ≥3 adapters. BRIEF first,
-  implementation later. Not urgent — #17 mitigation is working.
+- [x] [shipped 2026-04-14: landed `--verdict-mcp` end-to-end; Layer 0
+  MCP-tool parse validated live on claude adapter]
+  **Finding #17 MCP tool-use spike** — skipped BRIEF, went straight
+  to implementation. Shape: stdio JSON-RPC MCP server (`expo_refine`,
+  tool `submit_verdict`), per-iter config + per-iter inbox file
+  (`.refine/inbox/verdict-iter-N.json`) as the channel back to refine.
+  Server is dispatched via a hidden `__refine-mcp-server` subcommand
+  on the `expo` binary so it works from the compiled binary (not just
+  `deno run`). Claude adapter: works. Codex/opencode/pi/generic: flag
+  no-ops with yellow-banner warning (they don't speak `--mcp-config`).
+  Smoke test run on `/tmp/expo-smoke` (README refinement against a
+  4-criterion rubric): 2 iters, both hit Layer 0 with
+  `refineParseMethod: mcp-tool`, no prose fallback. Files shipped:
+  `src/refine-mcp-server.ts`, `src/verdict-inbox.ts`,
+  `.claude/skills/expo:refine.md`, `tests/test-verdict-mcp.ts` (54
+  tests). Multi-adapter BRIEF can still be written later if codex
+  gets structured output, but not blocking.
 
 ## Design-cycle framing follow-ups #next-session
 
