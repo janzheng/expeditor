@@ -1236,6 +1236,11 @@ async function cmdRefine(args: string[]): Promise<void> {
   // shakedown Finding #4. Accept that the first discard will rewind
   // the working tree to the last-kept variant's snapshot.
   let forceStaleBaseline = false;
+  // --skip-baseline-check: skip the pre-run baseline-gate check added
+  // for shakedown Finding #13. Use when a gate is SUPPOSED to fail on
+  // baseline (TDD red-to-green) or when the agent will start a
+  // required service mid-run.
+  let skipBaselineCheck = false;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
@@ -1270,6 +1275,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--per-agent-budget" && args[i + 1]) perAgentBudget = parseFloat(args[++i]);
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
     else if (args[i] === "--force-stale-baseline") forceStaleBaseline = true;
+    else if (args[i] === "--skip-baseline-check") skipBaselineCheck = true;
     else if (args[i] === "--scope" && args[i + 1]) {
       // Greedy: consume all following non-flag values as additional globs.
       // Also supports the repeated-flag form (`--scope A --scope B`). Fixes
@@ -1451,11 +1457,13 @@ async function cmdRefine(args: string[]): Promise<void> {
       approvalHookTimeout,
       scope: scope.length > 0 ? scope : undefined,
       forceStaleBaseline,
+      skipBaselineCheck,
     });
   } catch (err) {
-    // Clean exit for the stale-baseline refusal — helpful message has
-    // already been printed to stderr by refine(). Fixes shakedown
-    // Finding #4.
+    // Clean exits for the two pre-flight refusals — helpful messages have
+    // already been printed to stderr by refine(). Distinct exit codes let
+    // CI branch on the cause. Finding #4 (stale baseline, exit 4) and
+    // Finding #13 (baseline gate failure, exit 5).
     const msg = (err instanceof Error ? err.message : String(err)) || "";
     if (msg.includes("stale baseline")) {
       unguard();
@@ -1464,6 +1472,14 @@ async function cmdRefine(args: string[]): Promise<void> {
         try { eventFileHandle.close(); } catch { /* already closed */ }
       }
       Deno.exit(4);
+    }
+    if (msg.includes("baseline gate failure")) {
+      unguard();
+      await bus.close();
+      if (eventFileHandle) {
+        try { eventFileHandle.close(); } catch { /* already closed */ }
+      }
+      Deno.exit(5);
     }
     throw err;
   }

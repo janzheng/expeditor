@@ -197,6 +197,14 @@ export class AgentSpawner {
   /** Per-process cache — computed once, reused for every spawn. */
   private static _setsidAvailable: boolean | undefined;
 
+  /** Grace period (ms) after SIGTERM before escalating to SIGKILL in
+   *  `killAgent`. 5000ms matches timeout.ts's default — long enough for a
+   *  graceful exit (deno's SIGTERM handler usually completes within a
+   *  second or two), short enough that cost-accumulation from a stuck
+   *  subprocess gets capped quickly. See Finding #12. Override for tests
+   *  via `AgentSpawner.KILL_GRACE_MS = 100`. */
+  static KILL_GRACE_MS = 5000;
+
   /** Send SIGTERM to a running agent (and its process group if `setsid`
    *  was used at spawn). Looks up the pid from the registry. Idempotent;
    *  safe to call on already-dead agents.
@@ -222,6 +230,43 @@ export class AgentSpawner {
     if (reason) {
       console.warn(`[spawner] killed ${agentId} (pid ${pid}): ${reason}`);
     }
+
+    // Finding #12: escalate to SIGKILL if the process doesn't exit after
+    // the grace period. Observed on shakedown: cost-guard sent SIGTERM to
+    // an agent mid-`deno task test`; the subprocess (deno → test framework
+    // → user code) didn't propagate SIGTERM cleanly and kept running while
+    // cost accumulated — $3.15 on a $2 budget before natural completion.
+    //
+    // Pattern matches timeout.ts: group-kill with TERM, wait N ms, then
+    // group-kill with KILL if still running. Check registry status to
+    // avoid spurious SIGKILLs on processes that DID exit cleanly.
+    //
+    // Fire-and-forget — we don't block `killAgent`'s return on the
+    // escalation, just schedule it. Unref the timer so it doesn't hold
+    // the event loop open after the run finishes.
+    const graceMs = AgentSpawner.KILL_GRACE_MS;
+    const escalationTimer = setTimeout(() => {
+      const current = this.registry.get(agentId);
+      // Only escalate if the agent is STILL marked running. If it exited
+      // cleanly on SIGTERM, the registry status will be "done" or "failed"
+      // by now (exit handler updates registry), and we should skip.
+      if (!current || current.status !== "running") return;
+      console.warn(
+        `[spawner] ${agentId} (pid ${pid}) did not exit after SIGTERM + ${graceMs}ms — escalating to SIGKILL`,
+      );
+      if (!AgentSpawner.tryKillProcessGroup(pid, "KILL")) {
+        try {
+          Deno.kill(pid, "SIGKILL");
+        } catch {
+          // Process already dead — safe.
+        }
+      }
+    }, graceMs);
+    // Don't block process exit on this timer (e.g., if the run completes
+    // normally while an escalation timer is still pending, Deno shouldn't
+    // wait 5s before exiting).
+    Deno.unrefTimer(escalationTimer);
+
     return true;
   }
 

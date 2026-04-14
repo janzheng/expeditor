@@ -113,6 +113,22 @@ export interface RefineOptions {
    *  accept the rewind explicitly (e.g. for resume flows where drift
    *  is expected). */
   forceStaleBaseline?: boolean;
+
+  /** Skip the pre-run baseline-gate check (shakedown Finding #13).
+   *
+   *  By default, before spawning iter-1, refine runs all seeded gates
+   *  once against the current baseline. If any fail, refine refuses
+   *  to start — because otherwise every iteration's gate step would
+   *  force-discard regardless of the agent's actual work (since the
+   *  gate was already broken before the agent touched anything).
+   *
+   *  Set this to accept a failing baseline gate explicitly. The
+   *  primary legitimate use is TDD red-to-green workflows where the
+   *  gate is SUPPOSED to fail on baseline and the agent's job is to
+   *  make it pass. The other case is a gate that expects a running
+   *  service (e.g. integration tests) where the user will start the
+   *  service after refine launches. */
+  skipBaselineCheck?: boolean;
 }
 
 export interface RefineResult {
@@ -671,6 +687,73 @@ To proceed, pick one:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `);
       throw new Error(`refine: stale baseline — use --force-stale-baseline to override`);
+    }
+  }
+
+  // Pre-flight baseline-gate check (shakedown Finding #13). Agents can only
+  // produce keep-quality work if the invariant ratchet is green to start
+  // with; a gate that fails on the unmodified tree force-discards every
+  // iteration regardless of what the agent does. That's a silent-$20-per-run
+  // burn with no useful signal.
+  //
+  // Opt out with --skip-baseline-check (TDD red-to-green or
+  // agent-will-start-the-service flows).
+  if (!opts.skipBaselineCheck) {
+    const baselineId = getLastKeptId(variants);
+    if (baselineId) {
+      const checkResults = await checkRefineGates(dir, baselineId, {
+        timeoutMs: (opts.gateTimeout ?? 60) * 1000,
+      });
+      const failures = checkResults.filter((r) => !r.pass);
+      if (failures.length > 0) {
+        console.error(`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠  BASELINE GATE FAILURE — refine refuses to start
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Seeded gates FAIL against the current baseline — before any agent
+has touched the code. Every iteration would force-discard on these
+gates regardless of what the agent produces, burning budget for
+no useful signal.
+
+  Failing gate${failures.length === 1 ? "" : "s"}: ${failures.length} of ${checkResults.length}
+
+${failures
+  .map((f) => {
+    const src = f.source === "inherited" ? ` (inherited from [${f.addedBy}])` : "";
+    const reason = f.timedOut ? `timeout after ${f.durationMs}ms` : `exit ${f.exitCode}`;
+    const stderrLine = f.stderr && f.stderr.trim()
+      ? `\n      stderr: ${f.stderr.trim().split("\n").slice(0, 2).join(" | ").slice(0, 180)}`
+      : "";
+    return `  ✗ ${f.name}${src}
+      command: ${f.command}
+      reason:  ${reason}${stderrLine}`;
+  })
+  .join("\n\n")}
+
+To proceed, pick one:
+
+  1. Fix the baseline failure manually, then re-run refine.
+     Most common: start a service the gate depends on, install a
+     missing tool, or commit a fix to the current tree.
+
+  2. Re-run with --skip-baseline-check to accept the failing gate.
+     Use this for TDD red-to-green (agent's job is to MAKE it pass)
+     or for gates that expect a service you'll start after launch.
+     The gate step still runs every iteration — if baseline was the
+     only thing broken, agent's first keep will turn it green.
+
+  3. Remove or replace the gate:
+       expo refine . gate remove ${failures[0].name}
+     …or override its command:
+       expo refine . gate add ${failures[0].name} --command 'new-cmd'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`);
+        throw new Error(
+          `refine: baseline gate failure (${failures.length} of ${checkResults.length}) — use --skip-baseline-check to override`,
+        );
+      }
     }
   }
 

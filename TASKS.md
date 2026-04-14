@@ -28,27 +28,35 @@ Items carried forward from the 2026-04-13 shakedown + Finding #17
 follow-up work. Sequenced — #13 unblocks #17's broader validation,
 so do it first.
 
-- [ ] **Finding #13** (MEDIUM, carried forward) — pre-flight gates
-  against baseline before iter-1. Broken baseline gates silently
-  sabotage every iteration. Matches Hypothesis #1 in
-  `.brief/other-repo-shakedown.md`. Fix: run seeded gates once before
-  the refine loop starts, refuse to spawn iter-1 with a clear
-  message on any failure. Add `--skip-baseline-check` escape hatch
-  for intentionally-failing baselines (TDD red-to-green). Distinct
-  exit code (5?) so CI can branch on it.
-  **Blocks:** Finding #17 broader-validation item below. Running
-  refine on external repos with broken baseline would misleadingly
-  look like "refine doesn't converge" when it's really this bug.
-  `-> tests/test-refine-gate-check.ts` — add regression.
+- [x] **Finding #13** (MEDIUM, shipped 2026-04-13) — pre-flight
+  gates against baseline before iter-1. Uses the existing
+  `checkRefineGates` helper (non-short-circuiting, returns all
+  gate results) to inspect the baseline-variant state; if any
+  fail, prints a helpful banner with command/exit/stderr per
+  failure and three fix directions, then throws
+  "baseline gate failure (N of M)". CLI catches and exits 5
+  (distinct from exit 4 for stale-baseline). New
+  `--skip-baseline-check` flag bypasses the check for TDD
+  red-to-green or agent-starts-the-service flows.
+  Regression test: `tests/test-refine-baseline-gate-check.ts`
+  (10 checks, all passing) — verifies the banner, the bypass
+  flag, and the no-gates no-op case.
 
-- [ ] **Finding #12** (LOW-MEDIUM, carried forward) — per-agent
-  budget overrun on long Bash calls. Cost-guard can't interrupt an
-  in-flight subprocess; observed $3.15 on $2 budget (57% overrun)
-  mid-`deno task test`. Fix direction: when budget exceeded,
-  `process.kill(-pid, SIGTERM)` the subprocess's process group
-  (not just signal the agent wrapper). Gracefully timeout at
-  SIGTERM + 5s, escalate to SIGKILL. Add a regression test with a
-  scripted "long sleep" subprocess + $0.10 budget.
+- [x] **Finding #12** (LOW-MEDIUM, shipped 2026-04-13) — per-agent
+  budget overrun on long Bash calls. Root cause: `killAgent` sent
+  SIGTERM once and walked away. If the subprocess ignored SIGTERM
+  (test runners in blocking syscalls, signal traps, etc.), cost kept
+  accumulating until natural completion.
+  Fix: added the SIGTERM → grace → SIGKILL pattern that
+  `timeout.ts` already used. After SIGTERM, schedule an unrefed
+  timer; when it fires, check registry status — if still "running",
+  escalate to SIGKILL. New `AgentSpawner.KILL_GRACE_MS` (default
+  5000ms, overridable for tests).
+  Regression test: `tests/test-spawner-kill-escalation.ts` —
+  spawns a SIGTERM-trapped `sh` process, verifies it gets SIGKILLed
+  after grace period; verifies cooperative processes (status→done
+  before grace) don't trigger a spurious SIGKILL; verifies the
+  unknown-agent no-op returns false. 5 checks, all passing.
 
 - [ ] **Finding #14** (LOW, carried forward) — polyglot `--auto`
   opt-out. No way to say "skip cargo_test, I don't want the Rust
