@@ -24,7 +24,61 @@ Multi-agent orchestration with a signal bus. CLI command: `expo`. See [TASKS-DES
 
 ## Current
 
-All actionable work complete. 3 P3 items remain in design/question phase.
+Items carried forward from the 2026-04-13 shakedown + Finding #17
+follow-up work. Sequenced — #13 unblocks #17's broader validation,
+so do it first.
+
+- [ ] **Finding #13** (MEDIUM, carried forward) — pre-flight gates
+  against baseline before iter-1. Broken baseline gates silently
+  sabotage every iteration. Matches Hypothesis #1 in
+  `.brief/other-repo-shakedown.md`. Fix: run seeded gates once before
+  the refine loop starts, refuse to spawn iter-1 with a clear
+  message on any failure. Add `--skip-baseline-check` escape hatch
+  for intentionally-failing baselines (TDD red-to-green). Distinct
+  exit code (5?) so CI can branch on it.
+  **Blocks:** Finding #17 broader-validation item below. Running
+  refine on external repos with broken baseline would misleadingly
+  look like "refine doesn't converge" when it's really this bug.
+  `-> tests/test-refine-gate-check.ts` — add regression.
+
+- [ ] **Finding #12** (LOW-MEDIUM, carried forward) — per-agent
+  budget overrun on long Bash calls. Cost-guard can't interrupt an
+  in-flight subprocess; observed $3.15 on $2 budget (57% overrun)
+  mid-`deno task test`. Fix direction: when budget exceeded,
+  `process.kill(-pid, SIGTERM)` the subprocess's process group
+  (not just signal the agent wrapper). Gracefully timeout at
+  SIGTERM + 5s, escalate to SIGKILL. Add a regression test with a
+  scripted "long sleep" subprocess + $0.10 budget.
+
+- [ ] **Finding #14** (LOW, carried forward) — polyglot `--auto`
+  opt-out. No way to say "skip cargo_test, I don't want the Rust
+  tests in my refine loop." Fix: `--auto-exclude <name>,<name>`
+  flag that suppresses specific auto-seeded gates. Trivial parser
+  work + one banner line change.
+
+- [ ] **Finding #17 broader validation** — run refine on 3-5 varied
+  codebases to battle-test the multi-layer parser. Current sample
+  is 1 (snapshot smoke test). Criteria: run on codebases of
+  different shapes (pure TS, polyglot, TS+Python, node project,
+  deno project). For each: observe `refineParseMethod` distribution,
+  retry-spawn rate, keep rate. Write results to
+  `.brief/finding-17-validation/` as a short report. If retry rate
+  stays <10% and keep rate stays ≥80% across all 5, call the fix
+  battle-tested.
+  **Blocked by:** Finding #13 (pre-flight gates) — otherwise
+  baseline-gate-broken repos would foul the measurement.
+
+- [ ] **Finding #17 MCP tool-use spike** (architecture BRIEF)
+  `-> .brief/finding-17-mcp-tool-use.md` (to write)
+  The four-layer parser mitigates the harness-contract gap but
+  doesn't close it at the source. The proper fix is tool-use /
+  structured-output: expose a `submit_verdict` tool the agent MUST
+  call. Expo currently spawns via CLI adapters (claude / codex /
+  opencode / pi / generic) which have different tool-use support.
+  Spike: investigate what each adapter can offer (MCP server?
+  direct Anthropic SDK? plain stdin/stdout JSON schema?) and
+  recommend a shape that works across ≥3 adapters. BRIEF first,
+  implementation later. Not urgent — #17 mitigation is working.
 
 ## Design-cycle framing follow-ups #next-session
 
