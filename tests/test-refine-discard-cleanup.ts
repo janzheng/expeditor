@@ -281,6 +281,63 @@ console.log(
 }
 
 console.log(
+  "\nFinding #16 follow-up: agentSpawnTime skips files whose mtime predates spawn:",
+);
+{
+  const dir = await makeGitRepo();
+  try {
+    // User-created untracked file, written BEFORE the agent's "spawn time."
+    // This is the race the Finding #16 follow-up guards against: if
+    // preAgentDirty captured a moment too early, a legitimate user file
+    // could land in agentTouchedPaths and get wiped.
+    await Deno.writeTextFile(join(dir, "user-brief.md"), "user content\n");
+    // Wait a hair so mtime is comfortably before spawn cutoff.
+    await new Promise((r) => setTimeout(r, 3100));
+
+    const agentSpawnTime = Date.now();
+    // Simulate an agent-created file WITHIN the spawn window.
+    await Deno.writeTextFile(join(dir, "agent-output.ts"), "// agent made this\n");
+
+    const agentTouchedPaths = ["user-brief.md", "agent-output.ts"];
+    await cleanupUntrackedAgentPaths(dir, agentTouchedPaths, {
+      agentSpawnTime,
+      context: "test",
+    });
+
+    check(
+      "user-brief.md (pre-spawn mtime) NOT removed",
+      await exists(dir, "user-brief.md"),
+    );
+    check(
+      "agent-output.ts (post-spawn mtime) removed",
+      !(await exists(dir, "agent-output.ts")),
+    );
+  } finally {
+    await cleanup(dir);
+  }
+}
+
+console.log(
+  "\nFinding #16 follow-up: without agentSpawnTime, behaves as before (no mtime skip):",
+);
+{
+  const dir = await makeGitRepo();
+  try {
+    await Deno.writeTextFile(join(dir, "pre-existing.md"), "old content\n");
+    const agentTouchedPaths = ["pre-existing.md"];
+    // Omit agentSpawnTime — should fall back to the old behaviour
+    // (remove anything untracked in agentTouchedPaths).
+    await cleanupUntrackedAgentPaths(dir, agentTouchedPaths);
+    check(
+      "without agentSpawnTime: pre-existing untracked file IS removed (old behaviour)",
+      !(await exists(dir, "pre-existing.md")),
+    );
+  } finally {
+    await cleanup(dir);
+  }
+}
+
+console.log(
   "\nFinding #16: cleanup on non-git dir is a safe no-op (no wipe):",
 );
 {

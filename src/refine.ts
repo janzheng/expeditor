@@ -889,6 +889,10 @@ To proceed, pick one:
     //    Best-effort — any failure (not a git repo, etc.) just skips the
     //    scoping and we fall back to the old -A behaviour.
     const preAgentDirty = await listDirtyPaths(dir);
+    // Also capture the spawn timestamp so we can later skip cleanup on
+    // files whose mtime predates it — those are user files caught by a
+    // `preAgentDirty` race (Finding #16 follow-up, 2026-04-13 evening).
+    const agentSpawnTime = Date.now();
 
     // c. Spawn agent
     const agentName = `${prefix}-iter-${iterations}`;
@@ -1099,7 +1103,7 @@ To proceed, pick one:
           const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
             change: verdict.change,
             summary: `scope_violation: ${violations.slice(0, 5).join(", ")}`.slice(0, 300),
-          }, agentTouchedPaths);
+          }, agentTouchedPaths, agentSpawnTime, `${agentName} (scope)`);
           if (outcome === "exhausted") {
             variants = await list(dir);
             await updateRefineMd(bus, spawner, dir, variants, opts);
@@ -1155,7 +1159,7 @@ To proceed, pick one:
         const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
           change: verdict.change,
           summary: `gate_failed:${gateResult.failed!.name} — ${verdict.summary}`.slice(0, 300),
-        }, agentTouchedPaths);
+        }, agentTouchedPaths, agentSpawnTime, `${agentName} (gate)`);
         if (outcome === "exhausted") {
           variants = await list(dir);
           await updateRefineMd(bus, spawner, dir, variants, opts);
@@ -1214,7 +1218,7 @@ To proceed, pick one:
       const outcome = await recordDiscardAndMaybeBranch(dir, variants, discardCounts, {
         change: verdict.change,
         summary: verdict.summary,
-      }, agentTouchedPaths);
+      }, agentTouchedPaths, agentSpawnTime, `${agentName} (rubric)`);
       if (outcome === "exhausted") {
         variants = await list(dir);
         await updateRefineMd(bus, spawner, dir, variants, opts);
@@ -2169,6 +2173,12 @@ async function recordDiscardAndMaybeBranch(
    *  filtered out of agentTouchedPaths at snapshot time). Scoped to paths
    *  the AGENT created, not concurrent user work. */
   agentTouchedPaths?: string[],
+  /** Epoch ms when the agent spawned, threaded through to the cleanup
+   *  helper so it can skip files whose mtime predates the spawn (they
+   *  can't have been agent-created). Finding #16 follow-up. */
+  agentSpawnTime?: number,
+  /** Context label for cleanup log messages (iter id, agent name). */
+  context?: string,
 ): Promise<"continue" | "exhausted"> {
   const lastKeptId = getLastKeptId(variants);
   if (lastKeptId) {
@@ -2192,7 +2202,10 @@ async function recordDiscardAndMaybeBranch(
   // it), we skip cleanup entirely. Leaving untracked cruft is strictly better
   // than wiping tracked files.
   if (agentTouchedPaths && agentTouchedPaths.length > 0) {
-    await cleanupUntrackedAgentPaths(dir, agentTouchedPaths);
+    await cleanupUntrackedAgentPaths(dir, agentTouchedPaths, {
+      agentSpawnTime,
+      context,
+    });
   }
 
   await discard(dir, entry);
@@ -3340,12 +3353,34 @@ export async function listUntrackedPaths(dir: string): Promise<Set<string> | nul
  *  would destroy legitimate state (Finding #16, 2026-04-13: this path was
  *  wiping README.md after a scope_violation discard on snapshot).
  *
+ *  Finding #16 follow-up (2026-04-13 evening): the set-difference used to
+ *  build `agentTouchedPaths` is subject to a race — if a user (or another
+ *  process) creates a file between `preAgentDirty` capture and agent spawn,
+ *  that file looks agent-created when it isn't. Observed: an assistant
+ *  writing a BRIEF doc into the repo while refine was starting up had it
+ *  caught in iter-1's scope violation and wiped.
+ *
+ *  Defenses stacked here:
+ *   - If `agentSpawnTime` is provided, skip paths whose mtime predates it
+ *     by >1s (filesystem-resolution buffer). A file that existed before the
+ *     agent spawned can't be "agent-created."
+ *   - Log each removal so users can see what's being deleted and catch
+ *     patterns if more false-positives show up.
+ *
  *  Best-effort: on git-unavailable or any remove failure, we skip rather than
  *  wipe. Leaving an untracked file behind is annoying; wiping a tracked one
- *  is a bug. */
+ *  (or a user-written BRIEF) is a bug. */
 export async function cleanupUntrackedAgentPaths(
   dir: string,
   agentTouchedPaths: string[],
+  opts?: {
+    /** Epoch ms when the agent was spawned. Used to skip files whose
+     *  mtime predates the spawn — those are user files caught by a race
+     *  in `preAgentDirty` capture, not agent-created. */
+    agentSpawnTime?: number;
+    /** Label for log messages (agent id, iter number, etc.). */
+    context?: string;
+  },
 ): Promise<void> {
   if (agentTouchedPaths.length === 0) return;
   const untracked = await listUntrackedPaths(dir);
@@ -3357,10 +3392,38 @@ export async function cleanupUntrackedAgentPaths(
     // state is destroyed.
     return;
   }
+  const ctx = opts?.context ? `[${opts.context}] ` : "";
+  // Filesystem mtime resolution is 1s on HFS+ / 2s on FAT, so buffer the
+  // comparison. A file stat'd as "1s before spawn" is plausibly the same
+  // write as the spawn moment; don't skip on that edge.
+  const mtimeCutoff = opts?.agentSpawnTime !== undefined
+    ? opts.agentSpawnTime - 2000
+    : undefined;
   for (const p of agentTouchedPaths) {
     if (!untracked.has(p)) continue; // tracked — restore already handled it
+
+    // Finding #16 follow-up: skip files that predate the agent. Cheap
+    // heuristic — doesn't catch every race (a user write AFTER spawn start
+    // still looks agent-created) but does catch the common case.
+    if (mtimeCutoff !== undefined) {
+      try {
+        const stat = await Deno.stat(`${dir}/${p}`);
+        if (stat.mtime && stat.mtime.getTime() < mtimeCutoff) {
+          console.warn(
+            `${ctx}cleanup: skipping ${p} — mtime predates agent spawn (${stat.mtime.toISOString()} < ${new Date(opts!.agentSpawnTime!).toISOString()})`,
+          );
+          continue;
+        }
+      } catch {
+        // stat failed — file already gone or path is weird. Fall through
+        // to remove; Deno.remove will also fail cleanly if the file
+        // doesn't exist.
+      }
+    }
+
     try {
       await Deno.remove(`${dir}/${p}`, { recursive: true });
+      console.warn(`${ctx}cleanup: removed ${p} (untracked, agent-touched)`);
     } catch {
       // File may already be gone (concurrent cleanup, symlink races, etc.)
       // or may be a dir that's been partially cleaned — safe to ignore.
