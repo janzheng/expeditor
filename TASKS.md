@@ -432,6 +432,13 @@ the other ten shipped same-day.
   Doesn't catch the user-writes-AFTER-spawn race — that's the
   architectural fix the `snapshot/.brief/concurrency-contract.md`
   BRIEF addresses via fail-loud heartbeat.
+  **Residual race closed 2026-04-14** by snapshot's concurrency
+  heartbeat v1. A user attempting to write to the same tree during
+  refine now hits a clear `HeartbeatConflictError` on their own
+  snapshot attempt rather than having their untracked file silently
+  wiped. The `.brief/finding-16-adapter-signal-tracking.md` BRIEF's
+  Option E (punt to concurrency heartbeat) is the shipped path;
+  adapter-signal tracking (Option A) remains deferred indefinitely.
 
 - [x] **Finding #17** (SEV-2 / root-cause follow-up to #15) — agent-
   harness contract gap. Agents skip the `<verdict>` wrapper 40-80%

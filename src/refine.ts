@@ -16,15 +16,20 @@ import { AgentSpawner, type AgentType } from "./spawner.ts";
 import { spawnAndWait } from "./orchestrator.ts";
 import {
   addGate,
+  checkHeartbeat,
+  clearHeartbeat,
   collectGates,
   discard,
+  HeartbeatConflictError,
   init,
   list,
   listGates,
   removeGate,
   restore,
   snapshot,
+  touchHeartbeat,
   tree,
+  writeHeartbeat,
 } from "@snapshot/core";
 import type { Gate, Variant } from "@snapshot/core";
 
@@ -129,6 +134,21 @@ export interface RefineOptions {
    *  service (e.g. integration tests) where the user will start the
    *  service after refine launches. */
   skipBaselineCheck?: boolean;
+
+  /** Take over a foreign heartbeat at `.refine/heartbeat.json` even if
+   *  it looks live (see `snapshot/.brief/concurrency-contract.md`).
+   *
+   *  By default, if another refine / snapshot / restore / discard /
+   *  addGate / removeGate is mid-flight on the same `dir`, the check
+   *  throws `HeartbeatConflictError` and refine refuses to start — the
+   *  two processes would otherwise race on the manifest and tag graph.
+   *  Stale heartbeats (updatedAt older than ~30s) are auto-expired
+   *  without this flag. Set this when you're sure the prior holder
+   *  crashed but hasn't aged past the staleness threshold yet, and
+   *  you want to plow through without manually deleting the file.
+   *  CLI surface: `--force-stale-heartbeat`. Distinct exit code 6
+   *  so CI can branch on heartbeat conflicts separately. */
+  forceStaleHeartbeat?: boolean;
 }
 
 export interface RefineResult {
@@ -606,6 +626,31 @@ export async function refine(
 
   // 1. Init snapshot tracking
   await init(dir);
+
+  // 1b. Concurrency heartbeat — claim the archive before doing anything
+  //     that mutates manifest/tags/HEAD. See
+  //     `snapshot/.brief/concurrency-contract.md`. `checkHeartbeat`
+  //     throws `HeartbeatConflictError` if another process holds a fresh
+  //     heartbeat here; the CLI layer catches that and translates it to
+  //     exit code 6. All subsequent snapshot/restore/discard calls inside
+  //     this function see our own pid on the heartbeat and pass the
+  //     same-pid re-entry check cleanly. We touch updatedAt at every
+  //     iteration boundary so a watching process can tell we're alive.
+  await checkHeartbeat(dir, { force: opts.forceStaleHeartbeat });
+  await writeHeartbeat(dir, "refine");
+  // Refresh the heartbeat on a 10s cadence — independent of the
+  // iteration clock because agent calls can run 30s–15min and we'd
+  // otherwise let the heartbeat go stale mid-iteration, inviting a
+  // second refine to incorrectly take over. The timer is unref'd so it
+  // doesn't hold the event loop open if refine finishes first; the
+  // finally below clears the interval before clearing the heartbeat so
+  // a late tick can't resurrect the file after we've released it.
+  const HEARTBEAT_TOUCH_INTERVAL_MS = 10_000;
+  const heartbeatTimer = setInterval(() => {
+    touchHeartbeat(dir).catch(() => { /* best-effort */ });
+  }, HEARTBEAT_TOUCH_INTERVAL_MS);
+  Deno.unrefTimer(heartbeatTimer);
+  try {
 
   // 2. Snapshot baseline if this is a fresh session (no variants yet)
   let variants = await list(dir);
@@ -1234,6 +1279,21 @@ To proceed, pick one:
   await updateRefineMd(bus, spawner, dir, variants, opts);
   await clearInflight(dir);
   return buildResult("MAX_ITERATIONS", iterations, totalCost, variants, finalVariantId, gateFailures, gatesProposed, infraFailures, preRunKept, preRunDiscarded, scopeViolations);
+
+  } finally {
+    // Stop the touch interval BEFORE clearing the heartbeat — otherwise
+    // a tick firing between our clear and the function returning would
+    // re-touch (no-op since touchHeartbeat checks ownership, but cleaner
+    // to just stop).
+    clearInterval(heartbeatTimer);
+    // Release the heartbeat on every exit path — normal return, early
+    // return, or thrown error. `clearHeartbeat` silently no-ops if the
+    // file is missing or was overwritten by another process, so there's
+    // no double-free concern. A crash that bypasses this finally (kill
+    // -9, OOM) leaves a stale file; the next process either auto-takes-
+    // over after 30s or the user can pass --force-stale-heartbeat.
+    await clearHeartbeat(dir).catch(() => { /* best-effort */ });
+  }
 }
 
 /** Emit a status-kind progress signal with refine-loop context. Collapses

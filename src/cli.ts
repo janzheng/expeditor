@@ -18,6 +18,7 @@ import { runMxit } from "./mxit-runner.ts";
 import { withTimeout } from "./timeout.ts";
 import { PermissionLedger } from "./permission-ledger.ts";
 import type { AgentSignal, DenialDetail } from "./types.ts";
+import { HeartbeatConflictError } from "@snapshot/core";
 
 // --- Paths ---
 const EXPO_DIR = ".expo";
@@ -1241,6 +1242,12 @@ async function cmdRefine(args: string[]): Promise<void> {
   // baseline (TDD red-to-green) or when the agent will start a
   // required service mid-run.
   let skipBaselineCheck = false;
+  // --force-stale-heartbeat: take over an otherwise-blocking fresh
+  // heartbeat at .refine/heartbeat.json (see snapshot's
+  // concurrency-contract BRIEF). Use when a prior refine crashed and
+  // hasn't aged past the 30s staleness threshold yet. Distinct exit
+  // code 6 lets CI branch on heartbeat conflicts specifically.
+  let forceStaleHeartbeat = false;
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--rubric" && args[i + 1]) rubric = args[++i];
@@ -1276,6 +1283,7 @@ async function cmdRefine(args: string[]): Promise<void> {
     else if (args[i] === "--total-budget" && args[i + 1]) totalBudget = parseFloat(args[++i]);
     else if (args[i] === "--force-stale-baseline") forceStaleBaseline = true;
     else if (args[i] === "--skip-baseline-check") skipBaselineCheck = true;
+    else if (args[i] === "--force-stale-heartbeat") forceStaleHeartbeat = true;
     else if (args[i] === "--scope" && args[i + 1]) {
       // Greedy: consume all following non-flag values as additional globs.
       // Also supports the repeated-flag form (`--scope A --scope B`). Fixes
@@ -1458,13 +1466,31 @@ async function cmdRefine(args: string[]): Promise<void> {
       scope: scope.length > 0 ? scope : undefined,
       forceStaleBaseline,
       skipBaselineCheck,
+      forceStaleHeartbeat,
     });
   } catch (err) {
-    // Clean exits for the two pre-flight refusals — helpful messages have
-    // already been printed to stderr by refine(). Distinct exit codes let
-    // CI branch on the cause. Finding #4 (stale baseline, exit 4) and
-    // Finding #13 (baseline gate failure, exit 5).
+    // Clean exits for the three pre-flight refusals — helpful messages
+    // have already been printed to stderr by refine() or the snapshot
+    // heartbeat layer. Distinct exit codes let CI branch on the cause.
+    // Finding #4 (stale baseline, exit 4), Finding #13 (baseline gate
+    // failure, exit 5), concurrency-contract (heartbeat conflict, exit 6).
     const msg = (err instanceof Error ? err.message : String(err)) || "";
+    // Heartbeat conflict — another refine/snapshot/restore is in flight
+    // against the same dir. Match by error instance (typed), not by
+    // message — snapshot throws HeartbeatConflictError and expo catches
+    // it here. Message-matching would be brittle across versions.
+    if (err instanceof HeartbeatConflictError) {
+      console.error(`${RED}${msg}${RESET}`);
+      console.error(
+        `${RED}\nRetry with --force-stale-heartbeat if you're sure the prior holder crashed.${RESET}`,
+      );
+      unguard();
+      await bus.close();
+      if (eventFileHandle) {
+        try { eventFileHandle.close(); } catch { /* already closed */ }
+      }
+      Deno.exit(6);
+    }
     if (msg.includes("stale baseline")) {
       unguard();
       await bus.close();
