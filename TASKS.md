@@ -417,6 +417,21 @@ the other ten shipped same-day.
   tests in `tests/test-refine-discard-cleanup.ts` (20 passing,
   was 12), covering tracked-preserved / untracked-removed / non-git
   safe-fallback.
+  **Follow-up shipped 2026-04-13 evening (`beec601`):** the
+  tracked-vs-untracked distinction is necessary but not sufficient.
+  A user (or parallel agent) writing a file between `preAgentDirty`
+  capture and agent spawn has that file appear agent-created, then
+  wiped on scope/gate discard. Observed during session 6 restore-
+  integrity run: an assistant writing a BRIEF doc had it caught in
+  iter-1's scope_violation and destroyed. Two additional defenses:
+  `cleanupUntrackedAgentPaths` now takes an `agentSpawnTime` option
+  and skips files whose mtime predates it by >2s (filesystem
+  resolution buffer) — those can't have been agent-created. Every
+  cleanup removal + skip is also logged with a context label, so
+  silent destruction is no longer possible. 3 new tests (23 total).
+  Doesn't catch the user-writes-AFTER-spawn race — that's the
+  architectural fix the `snapshot/.brief/concurrency-contract.md`
+  BRIEF addresses via fail-loud heartbeat.
 
 - [x] **Finding #17** (SEV-2 / root-cause follow-up to #15) — agent-
   harness contract gap. Agents skip the `<verdict>` wrapper 40-80%
