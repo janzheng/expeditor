@@ -644,10 +644,15 @@ exit 0
 
     if (opts.extraFlags) args.push(...opts.extraFlags);
 
-    // --allowedTools is variadic and swallows positional args after it,
-    // so when it's used we pipe the prompt via stdin instead.
+    // --allowedTools and --mcp-config are variadic — they swallow the
+    // prompt positional arg. When either is used we pipe the prompt via
+    // stdin instead.
     if (opts.allowedTools?.length) {
       args.push("--allowedTools", ...opts.allowedTools);
+      return { cmd: "claude", args, stdinPrompt: opts.prompt };
+    }
+
+    if (opts.mcpConfig) {
       return { cmd: "claude", args, stdinPrompt: opts.prompt };
     }
 
